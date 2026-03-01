@@ -1,0 +1,41 @@
+# Секреты и конфигурация
+.env
+**/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Логи
+logs/
+*.log
+
+# Данные пользователей
+user_data/
+user_states/
+trades_*.csv
+referrals.json
+pending_referrals.json
+
+# Тесты / отчёты
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

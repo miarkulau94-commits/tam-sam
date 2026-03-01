@@ -1,0 +1,7 @@
+# Development dependencies (install from project root: pip install -r requirements-dev.txt)
+-r "AutoScaleX Pro 2.2/requirements.txt"
+pytest-asyncio>=0.21
+pytest-cov>=4.0
+ruff>=0.1.0
+mypy>=1.0
+types-requests>=2.28

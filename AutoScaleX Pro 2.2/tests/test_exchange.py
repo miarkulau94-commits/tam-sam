@@ -1,0 +1,201 @@
+"""
+Unit tests for exchange — CircuitBreaker
+"""
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from exchange import CircuitBreaker, CircuitState
+
+
+class TestCircuitBreaker:
+    def test_initial_state_closed(self):
+        cb = CircuitBreaker(failure_threshold=3, timeout=1, success_threshold=2)
+        assert cb.state == CircuitState.CLOSED
+
+    def test_successful_call_passes(self):
+        cb = CircuitBreaker(failure_threshold=3, timeout=1, success_threshold=2)
+        result = cb.call(lambda: 42)
+        assert result == 42
+
+    def test_opens_after_threshold_failures(self):
+        cb = CircuitBreaker(failure_threshold=3, timeout=60, success_threshold=2)
+
+        def fail():
+            raise RuntimeError("API error")
+
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                cb.call(fail)
+        assert cb.state == CircuitState.OPEN
+
+    def test_blocks_when_open(self):
+        cb = CircuitBreaker(failure_threshold=2, timeout=60, success_threshold=2)
+
+        def fail():
+            raise RuntimeError("fail")
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                cb.call(fail)
+        assert cb.state == CircuitState.OPEN
+
+        with pytest.raises(RuntimeError, match="Circuit breaker is OPEN"):
+            cb.call(lambda: 1)
+
+    def test_api_key_error_not_counted(self):
+        cb = CircuitBreaker(failure_threshold=2, timeout=60, success_threshold=2)
+
+        def api_key_fail():
+            raise RuntimeError("Incorrect apiKey")
+
+        for _ in range(5):
+            with pytest.raises(RuntimeError):
+                cb.call(api_key_fail)
+        assert cb.state == CircuitState.CLOSED
+
+    def test_reset_closes_circuit(self):
+        cb = CircuitBreaker(failure_threshold=2, timeout=60, success_threshold=2)
+
+        def fail():
+            raise RuntimeError("fail")
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                cb.call(fail)
+        assert cb.state == CircuitState.OPEN
+        cb.reset()
+        assert cb.state == CircuitState.CLOSED
+        assert cb.call(lambda: 1) == 1
+
+
+class TestRateLimiter:
+    def test_init_tokens(self):
+        from exchange import RateLimiter
+        rl = RateLimiter(rate_limit=5, interval=60)
+        try:
+            assert rl.tokens == 5
+            for _ in range(5):
+                rl.wait()
+            assert rl.tokens == 0
+        finally:
+            rl.stop()
+
+    def test_stop(self):
+        from exchange import RateLimiter
+        rl = RateLimiter(rate_limit=10, interval=60)
+        rl.stop()
+        # stop should not raise
+
+
+class TestBingXSpotSign:
+    """BingXSpot._sign produces valid signature."""
+
+    def test_sign_adds_signature(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("key1", "secret1")
+        payload = ex._sign({"symbol": "BTC-USDT", "timestamp": "1234567890"})
+        assert "signature" in payload
+        assert isinstance(payload["signature"], str)
+        assert len(payload["signature"]) == 64  # sha256 hex
+
+    def test_sign_sorts_params(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        out = ex._sign({"a": "1", "b": "2"})
+        assert "signature" in out
+        assert out["a"] == "1"
+        assert out["b"] == "2"
+
+
+class TestBingXSpotAPI:
+    """BingXSpot API methods with mocked _request."""
+
+    def test_symbol_info_returns_structure_when_request_ok(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        raw = {
+            "symbols": [
+                {
+                    "symbol": "BTC-USDT",
+                    "status": 1,
+                    "filters": [
+                        {"filterType": "LOT_SIZE", "stepSize": "0.00001", "minQty": "0.00001"},
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "5"},
+                    ],
+                    "baseAsset": "BTC",
+                    "quoteAsset": "USDT",
+                }
+            ]
+        }
+        ex._request = lambda m, e, p=None: raw if e == "/openApi/spot/v1/common/symbols" else None
+        info = ex.symbol_info("BTC-USDT")
+        assert info["stepSize"] == Decimal("0.00001")
+        assert info["minQty"] == Decimal("0.00001")
+        assert info["tickSize"] == Decimal("0.01")
+        assert info["status"] == "TRADING"
+        assert info["baseAsset"] == "BTC"
+        assert info["quoteAsset"] == "USDT"
+
+    def test_symbol_info_returns_defaults_when_request_none(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, e, p=None: None
+        info = ex.symbol_info("BTC-USDT")
+        assert info["stepSize"] == Decimal("0.000001")
+        assert info["minQty"] == Decimal("0.000001")
+        assert info["tickSize"] == Decimal("0.01")
+        assert info["status"] == "UNKNOWN"
+
+    def test_symbol_info_raises_when_symbol_not_in_response(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, e, p=None: {"symbols": [{"symbol": "ETH-USDT"}]}
+        with pytest.raises(RuntimeError, match="BTC-USDT not found"):
+            ex.symbol_info("BTC-USDT")
+
+    def test_price_returns_decimal_from_ticker(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, e, p=None: [{"lastPrice": "50000.5"}] if "ticker" in e else None
+        price = ex.price("BTC-USDT")
+        assert price == Decimal("50000.5")
+
+    def test_balance_returns_decimal_from_balance_response(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, e, p=None: {"balances": [{"asset": "USDT", "free": "100", "locked": "10"}]} if "balance" in e else None
+        bal = ex.balance("USDT")
+        assert bal == Decimal("110")
+
+    def test_open_orders_returns_list(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, e, p=None: {"orders": [{"orderId": "1", "side": "BUY"}]} if "openOrders" in e else None
+        orders = ex.open_orders("BTC-USDT")
+        assert orders == [{"orderId": "1", "side": "BUY"}]
+
+    def test_open_orders_returns_empty_when_request_none(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, e, p=None: None
+        orders = ex.open_orders("BTC-USDT")
+        assert orders == []

@@ -367,7 +367,9 @@ class TestTradingCycleIntegration:
             "minNotional": Decimal("0"),
             "status": "TRADING",
         }
-        mock_exchange.invalidate_balance_cache = AsyncMock()
+        # Синхронный мок: BingXSpotAsync вызывает методы через asyncio.to_thread();
+        # AsyncMock в потоке возвращает корутину, которую никто не await'ит → RuntimeWarning.
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
         with (
             patch("trading_bot.config.STATE_DIR", state_dir),
             patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
@@ -411,7 +413,7 @@ class TestTradingCycleIntegration:
             "minNotional": Decimal("0"),
             "status": "TRADING",
         }
-        mock_exchange.invalidate_balance_cache = AsyncMock()
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
         with (
             patch("trading_bot.config.STATE_DIR", state_dir),
             patch("trading_bot.config.USER_DATA_DIR", user_data_dir),

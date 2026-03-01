@@ -21,7 +21,7 @@ log = logging.getLogger("config")
 API_KEY = os.getenv("BINGX_API_KEY", "")
 SECRET = os.getenv("BINGX_SECRET", "")
 TG_TOKEN = os.getenv("TG_TOKEN", "")
-TG_ADMIN_ID = int(os.getenv("TG_ADMIN_ID", "0"))  # ID администратора
+TG_ADMIN_ID = int(os.getenv("TG_ADMIN_ID") or "0")  # ID администратора (пустая строка = 0)
 
 # Шифрование API ключей. ОБЯЗАТЕЛЬНО в .env — без него бот не запустится.
 ENCRYPTION_SECRET = os.getenv("ENCRYPTION_SECRET", "")

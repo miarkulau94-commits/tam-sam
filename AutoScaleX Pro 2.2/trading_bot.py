@@ -443,7 +443,7 @@ class TradingBot:
                         log.info(f"🟥 SELL order {i + 1}: Placed at {level_price:.8f}, qty={qty:.8f}")
                         await asyncio.sleep(0.2)
                 except (OSError, RuntimeError, ValueError) as e:
-                    log.warning(f"Failed to place SELL order at {level_price}: {type(e).__name__}")
+                    log.warning(f"Failed to place SELL order at {level_price}: {type(e).__name__}: {e}")
             current_sell_price = current_sell_price * (Decimal("1") + self.grid_step_pct)
         return created
 
@@ -1062,17 +1062,22 @@ class TradingBot:
                 )
                 return False
 
-            # Проверяем, не превышен ли лимит BUY ордеров (на основе шага сетки)
+            # Лимит BUY после исполнения SELL: 60+1, 60+2, 60+3, 60+4 по мере исполнения SELL (61–64 BUY).
+            # После 5-го SELL — ребалансировка, новый BUY здесь не ставим.
             open_buy_orders = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
+            open_sell_orders = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
             max_buy_orders = self.get_max_buy_orders()
-            if len(open_buy_orders) >= max_buy_orders:
+            initial_sell_count = 5
+            # Сколько SELL уже исполнилось: 5 - open_sell. Разрешаем столько же дополнительных BUY.
+            max_allowed_after_sell = max_buy_orders + (initial_sell_count - len(open_sell_orders))
+            if len(open_buy_orders) >= max_allowed_after_sell:
                 log.warning(
-                    f"[CREATE_BUY_AFTER_SELL] FAILED: Maximum BUY orders reached: {len(open_buy_orders)} >= {max_buy_orders} (grid_step={self.grid_step_pct:.4f})"
+                    f"[CREATE_BUY_AFTER_SELL] FAILED: BUY limit reached: {len(open_buy_orders)} >= {max_allowed_after_sell} (open SELL={len(open_sell_orders)}, max BUY after SELL={max_allowed_after_sell}, grid_step={self.grid_step_pct:.4f})"
                 )
                 return False
 
             log.info(
-                f"Balance check passed: available={quote_available:.2f}, total={quote_total:.2f}, open BUY orders: {len(open_buy_orders)}, max: {max_buy_orders} (grid_step={self.grid_step_pct:.4f})"
+                f"Balance check passed: available={quote_available:.2f}, total={quote_total:.2f}, open BUY={len(open_buy_orders)}, open SELL={len(open_sell_orders)}, max BUY allowed after SELL={max_allowed_after_sell} (grid_step={self.grid_step_pct:.4f})"
             )
 
             # Рассчитываем цену нового BUY ордера: на месте исполненного SELL минус шаг сетки

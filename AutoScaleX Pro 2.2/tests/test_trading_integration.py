@@ -323,13 +323,14 @@ class TestTradingCycleIntegration:
 
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_at_max_returns_false_no_place_limit(self, temp_dirs, mock_exchange):
-        """При полном лимите BUY (60 для шага 1.5%) create_buy_after_sell возвращает False и не вызывает place_limit."""
+        """При 61 BUY и 4 открытых SELL (лимит после SELL = 61) create_buy_after_sell возвращает False и не вызывает place_limit."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_max")
         os.makedirs(trades_dir, exist_ok=True)
         mock_exchange.balance.return_value = Decimal("1000")
         mock_exchange.available_balance.return_value = Decimal("1000")
         mock_exchange.place_limit = MagicMock(return_value={"orderId": "would_be_new"})
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
         with (
             patch("trading_bot.config.STATE_DIR", state_dir),
             patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
@@ -340,16 +341,101 @@ class TestTradingCycleIntegration:
             patch("asyncio.sleep", AsyncMock()),
         ):
             bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
-            bot.grid_step_pct = Decimal("0.015")  # 1.5% -> max 60 BUY
-            # Заполняем 60 открытых BUY (лимит достигнут)
+            bot.grid_step_pct = Decimal("0.015")  # 1.5% -> max 60 BUY, после SELL разрешено 61–64
+            # 61 BUY + 4 открытых SELL (1 SELL уже исполнился) — лимит 61 достигнут
             bot.orders = [
                 Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i) * Decimal("0.5"), Decimal("0.1"), status="open")
-                for i in range(60)
+                for i in range(61)
+            ] + [
+                Order(f"sell_{j}", "SELL", Decimal("105") + Decimal(j), Decimal("0.1"), status="open")
+                for j in range(4)
             ]
             assert bot.get_max_buy_orders() == 60
             result = await bot.create_buy_after_sell(Decimal("101"))
             assert result is False
             mock_exchange.place_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_buy_after_sell_allows_61_when_60_buy_4_sell(self, temp_dirs, mock_exchange):
+        """После 1-го SELL: 60 BUY и 4 open SELL — разрешён 1 новый BUY (лимит 61), place_limit вызывается."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_61")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.return_value = Decimal("1000")
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_buy_61"})
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="KSM-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            bot.buy_order_value = Decimal("20")
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("4") - Decimal(i) * Decimal("0.01"), Decimal("5"), status="open")
+                for i in range(60)
+            ] + [
+                Order(f"sell_{j}", "SELL", Decimal("4.5") + Decimal(j) * Decimal("0.02"), Decimal("5"), status="open")
+                for j in range(4)
+            ]
+            result = await bot.create_buy_after_sell(Decimal("4.64"))
+            assert result is True
+            mock_exchange.place_limit.assert_called_once()
+            assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 61
+
+    @pytest.mark.asyncio
+    async def test_create_buy_after_sell_allows_62_63_64_by_open_sell_count(self, temp_dirs, mock_exchange):
+        """Лимит после SELL: 62 при 3 open SELL, 63 при 2, 64 при 1 — новый BUY выставляется."""
+        state_dir, user_data_dir = temp_dirs
+        mock_exchange.balance.return_value = Decimal("1000")
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_buy"})
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", os.path.join(tempfile.gettempdir(), "trades_62_64"), create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            bot.buy_order_value = Decimal("10")
+            for open_sell, open_buy in [(3, 61), (2, 62), (1, 63)]:
+                mock_exchange.place_limit.reset_mock()
+                bot.orders = [
+                    Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i), Decimal("0.1"), status="open")
+                    for i in range(open_buy)
+                ] + [
+                    Order(f"sell_{j}", "SELL", Decimal("105") + Decimal(j), Decimal("0.1"), status="open")
+                    for j in range(open_sell)
+                ]
+                result = await bot.create_buy_after_sell(Decimal("101"))
+                assert result is True, f"open_sell={open_sell}, open_buy={open_buy}"
+                mock_exchange.place_limit.assert_called_once()
+                assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == open_buy + 1
 
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_fallback_step_when_primary_price_occupied(self, temp_dirs, mock_exchange):
@@ -440,13 +526,14 @@ class TestTradingCycleIntegration:
 
     @pytest.mark.asyncio
     async def test_handle_sell_filled_at_max_profit_still_added_no_new_buy(self, temp_dirs, mock_exchange):
-        """При полном лимите BUY после handle_sell_filled прибыль копится (profit_bank растёт), новый BUY не создаётся."""
+        """При 61 BUY и 4 открытых SELL после handle_sell_filled прибыль копится, новый BUY не создаётся (лимит 61)."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_max2")
         os.makedirs(trades_dir, exist_ok=True)
         mock_exchange.balance.side_effect = lambda a: Decimal("0") if "ETH" in a else Decimal("1000")
         mock_exchange.available_balance.return_value = Decimal("1000")
         mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_buy_456"})
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
         with (
             patch("trading_bot.config.STATE_DIR", state_dir),
             patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
@@ -457,21 +544,24 @@ class TestTradingCycleIntegration:
             patch("asyncio.sleep", AsyncMock()),
         ):
             bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
-            bot.grid_step_pct = Decimal("0.015")  # 1.5% -> max 60 BUY
+            bot.grid_step_pct = Decimal("0.015")  # 1.5% -> max 60 BUY, после SELL разрешено 61–64
             bot.position_manager.add_position(Decimal("100"), Decimal("0.005"))
-            # 60 открытых BUY — лимит достигнут
+            # 61 BUY + 5 SELL (один заполним) — после заполнения 1 SELL останется 61 BUY и 4 SELL, лимит 61
             bot.orders = [
                 Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i) * Decimal("0.5"), Decimal("0.1"), status="open")
-                for i in range(60)
+                for i in range(61)
+            ] + [
+                Order(f"sell_{j}", "SELL", Decimal("105") + Decimal(j), Decimal("0.1"), status="open")
+                for j in range(5)
             ]
             initial_profit = bot.profit_bank
             initial_sells = bot.total_executed_sells
-            order = Order("sell1", "SELL", Decimal("101"), Decimal("0.005"), status="open")
+            order = bot.orders[-1]  # последний SELL заполняем
             await bot.handle_sell_filled(order, Decimal("101"))
             assert order.status == "filled"
             assert bot.profit_bank > initial_profit
             assert bot.total_executed_sells == initial_sells + 1
-            # Новый BUY не должен создаваться — place_limit не вызывался
+            # Новый BUY не создаётся — лимит 61 достигнут (61 BUY, 4 open SELL)
             mock_exchange.place_limit.assert_not_called()
 
     @pytest.mark.asyncio

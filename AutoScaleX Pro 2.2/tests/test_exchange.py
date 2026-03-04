@@ -274,3 +274,40 @@ class TestBingXSpotRateLimitRetry:
         assert mock_sleep.call_count == 2
         assert mock_sleep.call_args_list[0][0][0] == 18
         assert mock_sleep.call_args_list[1][0][0] == 36
+
+    def test_rate_limit_headers_low_remain_triggers_sleep(self):
+        """При успешном ответе с X-RateLimit Remain < 5 и Expire > 0 вызывается sleep(Expire+0.5)."""
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r = Mock()
+        r.raise_for_status = lambda: None
+        r.headers = {"X-RateLimit-Requests-Remain": "3", "X-RateLimit-Requests-Expire": "10"}
+        r.json = lambda: {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "100", "locked": "0"}]}}
+
+        with patch.object(ex.sess, "get", return_value=r):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+
+        assert result == Decimal("100")
+        mock_sleep.assert_called_once()
+        assert mock_sleep.call_args[0][0] == 10.5
+
+    def test_rate_limit_headers_remain_high_no_sleep(self):
+        """При Remain >= 5 sleep не вызывается."""
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r = Mock()
+        r.raise_for_status = lambda: None
+        r.headers = {"X-RateLimit-Requests-Remain": "10", "X-RateLimit-Requests-Expire": "60"}
+        r.json = lambda: {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "50", "locked": "0"}]}}
+
+        with patch.object(ex.sess, "get", return_value=r):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+
+        assert result == Decimal("50")
+        mock_sleep.assert_not_called()

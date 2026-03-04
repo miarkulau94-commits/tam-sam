@@ -216,6 +216,19 @@ class BingXSpot:
                     data = r.json()
                     if data.get("code") != 0:
                         raise RuntimeError(data.get("msg"))
+                    # Адаптивная пауза по заголовкам BingX (лимит по эндпоинту, сброс через Expire с)
+                    try:
+                        remain_str = r.headers.get("X-RateLimit-Requests-Remain")
+                        expire_str = r.headers.get("X-RateLimit-Requests-Expire")
+                        if remain_str is not None and expire_str is not None:
+                            remain = int(remain_str)
+                            expire = int(expire_str)
+                            if remain < 5 and expire > 0:
+                                wait = expire + 0.5
+                                log.info("BingX rate limit window low (remain=%s), waiting %.1fs", remain, wait)
+                                time.sleep(wait)
+                    except (ValueError, TypeError):
+                        pass
                     return data.get("data", data)
                 except Exception as e:
                     error_msg = str(e)

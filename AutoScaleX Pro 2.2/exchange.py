@@ -241,18 +241,26 @@ class BingXSpot:
                         "timeout" in error_msg.lower() or
                         "timed out" in error_msg.lower()
                     )
+                    is_rate_limit = "rate limit" in error_msg.lower() or "too many requests" in error_msg.lower()
                     is_non_critical_error = is_non_critical_api_error(error_msg)
-                    if is_non_critical_error:
+                    # Rate limit ретраим с длинной паузой, не бросаем сразу
+                    if is_non_critical_error and not is_rate_limit:
                         error_log.debug("API (non-critical)")
                         raise RuntimeError(error_msg)
-                    if is_timeout_error:
+                    if is_rate_limit:
+                        error_log.warning(f"API rate limited (attempt {attempt}/{max_attempts})")
+                    elif is_timeout_error:
                         error_log.warning(f"API timeout (attempt {attempt}/{max_attempts})")
                     else:
                         error_log.error(f"API failed (attempt {attempt}/{max_attempts}), error type: {type(e).__name__}")
                     if attempt < max_attempts:
-                        delay = 5 * attempt if is_timeout_error else 2 ** attempt
-                        if is_timeout_error:
-                            error_log.info(f"Waiting {delay}s before retry due to timeout...")
+                        if is_rate_limit:
+                            delay = 18 * attempt  # 18, 36, 54 сек — даём бирже время снять лимит (масштаб 100+ юзеров)
+                            error_log.info(f"Waiting {delay}s before retry (rate limit)...")
+                        else:
+                            delay = 5 * attempt if is_timeout_error else 2 ** attempt
+                            if is_timeout_error:
+                                error_log.info(f"Waiting {delay}s before retry due to timeout...")
                         time.sleep(delay)
                     else:
                         if is_timeout_error:
@@ -264,10 +272,15 @@ class BingXSpot:
                                 f"• Временные проблемы на стороне биржи BingX\n\n"
                                 f"Бот продолжит работу после восстановления соединения."
                             )
+                        elif is_rate_limit:
+                            error_msg_full = (
+                                f"API BingX: превышен лимит запросов (rate limit) после {max_attempts} попыток. "
+                                f"Повторите действие через минуту."
+                            )
                         else:
                             error_msg_full = f"BingX API request failed after {max_attempts} attempts"
                         
-                        is_non_critical = is_non_critical_api_error(error_msg_full)
+                        is_non_critical = is_non_critical_api_error(error_msg_full) or is_rate_limit
                         send_to_telegram = self.telegram_notifier and is_telegram_critical(error_msg_full)
                         if send_to_telegram:
                             try:

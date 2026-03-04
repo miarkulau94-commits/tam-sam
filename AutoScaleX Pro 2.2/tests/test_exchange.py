@@ -1,9 +1,10 @@
 """
-Unit tests for exchange — CircuitBreaker
+Unit tests for exchange — CircuitBreaker, rate limit retry.
 """
 
 import os
 import sys
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -199,3 +200,47 @@ class TestBingXSpotAPI:
         ex._request = lambda m, e, p=None: None
         orders = ex.open_orders("BTC-USDT")
         assert orders == []
+
+
+class TestBingXSpotRateLimitRetry:
+    """Rate limit: ретраи с длинной паузой (18, 36 сек), без немедленного raise."""
+
+    def test_rate_limited_retries_then_succeeds(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        # Эмуляция ответов BingX: два раза rate limited, третий — успех
+        def json_429():
+            return {"code": 429, "msg": "rate limited"}
+        def json_ok():
+            return {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "100", "locked": "0"}]}}
+
+        r1, r2 = Mock(), Mock()
+        r1.raise_for_status = r2.raise_for_status = lambda: None
+        r1.json = json_429
+        r2.json = json_429
+        r3 = Mock()
+        r3.raise_for_status = lambda: None
+        r3.json = json_ok
+
+        with patch.object(ex.sess, "get", side_effect=[r1, r2, r3]):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+
+        assert result == Decimal("100")
+        assert mock_sleep.call_count == 2
+        assert mock_sleep.call_args_list[0][0][0] == 18
+        assert mock_sleep.call_args_list[1][0][0] == 36
+
+    def test_rate_limited_exhausted_raises_with_message(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r = Mock()
+        r.raise_for_status = lambda: None
+        r.json = lambda: {"code": 429, "msg": "rate limited"}
+        with patch.object(ex.sess, "get", side_effect=[r, r, r]):
+            with patch("exchange.time.sleep"):
+                with pytest.raises(RuntimeError, match="rate limit|превышен лимит"):
+                    ex.balance("USDT")

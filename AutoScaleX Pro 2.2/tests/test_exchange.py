@@ -311,3 +311,22 @@ class TestBingXSpotRateLimitRetry:
 
         assert result == Decimal("50")
         mock_sleep.assert_not_called()
+
+    def test_rate_limit_headers_expire_capped_at_60s(self):
+        """При большом Expire (или в мс) пауза ограничена 60 с, чтобы не блокировать бота."""
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r = Mock()
+        r.raise_for_status = lambda: None
+        r.headers = {"X-RateLimit-Requests-Remain": "2", "X-RateLimit-Requests-Expire": "300000"}
+        r.json = lambda: {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "100", "locked": "0"}]}}
+
+        with patch.object(ex.sess, "get", return_value=r):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+
+        assert result == Decimal("100")
+        mock_sleep.assert_called_once()
+        assert mock_sleep.call_args[0][0] == 60.0

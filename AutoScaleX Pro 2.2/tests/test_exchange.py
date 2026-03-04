@@ -244,3 +244,33 @@ class TestBingXSpotRateLimitRetry:
             with patch("exchange.time.sleep"):
                 with pytest.raises(RuntimeError, match="rate limit|превышен лимит"):
                     ex.balance("USDT")
+
+    def test_frequency_limit_bingx_100410_retries_then_succeeds(self):
+        """BingX code 100410 'frequency limit' — те же ретраи 18/36 сек, что и для 'rate limited'."""
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        msg_100410 = "code:100410:The endpoint trigger frequency limit rule is currently in the disabled period and will be unblocked after 1772633973621"
+
+        def json_freq_limit():
+            return {"code": 100410, "msg": msg_100410}
+        def json_ok():
+            return {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "200", "locked": "0"}]}}
+
+        r1, r2 = Mock(), Mock()
+        r1.raise_for_status = r2.raise_for_status = lambda: None
+        r1.json = json_freq_limit
+        r2.json = json_freq_limit
+        r3 = Mock()
+        r3.raise_for_status = lambda: None
+        r3.json = json_ok
+
+        with patch.object(ex.sess, "get", side_effect=[r1, r2, r3]):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+
+        assert result == Decimal("200")
+        assert mock_sleep.call_count == 2
+        assert mock_sleep.call_args_list[0][0][0] == 18
+        assert mock_sleep.call_args_list[1][0][0] == 36

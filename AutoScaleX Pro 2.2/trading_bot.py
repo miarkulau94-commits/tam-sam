@@ -1896,14 +1896,19 @@ class TradingBot:
                 log.warning(f"[CREATE_BUY_AT_BOTTOM] Insufficient available balance: {quote_available:.2f} < {self.buy_order_value:.2f}")
                 return 0
 
-            # Проверяем лимит BUY ордеров: при достижении лимита новые не выставляем
+            # Лимит BUY: базовый 60; при 4,3,2,1 open SELL разрешаем 61–64 (как после исполнения SELL)
             max_buy_orders = self.get_max_buy_orders()
-            if len(open_buy_orders) >= max_buy_orders:
-                log.debug(f"[CREATE_BUY_AT_BOTTOM] BUY limit reached: {len(open_buy_orders)} >= {max_buy_orders}")
+            open_sell_orders = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
+            initial_sell_count = 5
+            max_allowed_buy = max_buy_orders + (initial_sell_count - len(open_sell_orders))
+            if len(open_buy_orders) >= max_allowed_buy:
+                log.debug(
+                    f"[CREATE_BUY_AT_BOTTOM] BUY limit reached: {len(open_buy_orders)} >= {max_allowed_buy} (open SELL={len(open_sell_orders)})"
+                )
                 return 0
 
             # Рассчитываем, сколько BUY ордеров можно создать (с учётом лимита и баланса)
-            max_orders = min(max_buy_orders - len(open_buy_orders), 5, int(quote_available / self.buy_order_value))
+            max_orders = min(max_allowed_buy - len(open_buy_orders), 5, int(quote_available / self.buy_order_value))
 
             created_count = 0
             current_buy_price = start_price
@@ -1911,8 +1916,8 @@ class TradingBot:
             for i in range(max_orders):
                 # Проверяем лимит перед каждым ордером (на случай гонок)
                 current_open_buy = len([o for o in self.orders if o.side == "BUY" and o.status == "open"])
-                if current_open_buy >= max_buy_orders:
-                    log.debug(f"[CREATE_BUY_AT_BOTTOM] BUY limit reached during loop: {current_open_buy} >= {max_buy_orders}")
+                if current_open_buy >= max_allowed_buy:
+                    log.debug(f"[CREATE_BUY_AT_BOTTOM] BUY limit reached during loop: {current_open_buy} >= {max_allowed_buy}")
                     break
                 # Проверяем доступный баланс перед каждым ордером
                 current_available = await self.ex.available_balance(self.quote_asset_name)

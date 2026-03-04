@@ -566,7 +566,7 @@ class TestTradingCycleIntegration:
 
     @pytest.mark.asyncio
     async def test_create_buy_orders_at_bottom_at_max_returns_zero(self, temp_dirs, mock_exchange):
-        """При полном лимите BUY create_buy_orders_at_bottom возвращает 0 и не выставляет ордера."""
+        """При лимите BUY после SELL (61 BUY и 4 open SELL) create_buy_orders_at_bottom возвращает 0."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_max3")
         os.makedirs(trades_dir, exist_ok=True)
@@ -574,6 +574,13 @@ class TestTradingCycleIntegration:
         mock_exchange.available_balance.return_value = Decimal("1000")
         mock_exchange.place_limit = MagicMock(return_value={"orderId": "would_be_new"})
         mock_exchange.get_current_price = MagicMock(return_value=Decimal("100"))
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
         with (
             patch("trading_bot.config.STATE_DIR", state_dir),
             patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
@@ -585,13 +592,58 @@ class TestTradingCycleIntegration:
         ):
             bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
             bot.grid_step_pct = Decimal("0.015")
+            # 61 BUY + 4 SELL -> max_allowed_buy = 61, лимит достигнут
             bot.orders = [
                 Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i) * Decimal("0.5"), Decimal("0.1"), status="open")
-                for i in range(60)
+                for i in range(61)
+            ] + [
+                Order(f"sell_{j}", "SELL", Decimal("105") + Decimal(j), Decimal("0.1"), status="open")
+                for j in range(4)
             ]
             created = await bot.create_buy_orders_at_bottom(Decimal("100"))
             assert created == 0
             mock_exchange.place_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_buy_orders_at_bottom_allows_one_when_60_buy_4_sell(self, temp_dirs, mock_exchange):
+        """Кнопка «Добавить Buy»: при 60 BUY и 4 open SELL разрешён 1 новый BUY (лимит 61)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_add1")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.return_value = Decimal("1000")
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_buy_add1"})
+        mock_exchange.get_current_price = MagicMock(return_value=Decimal("4.60"))
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="KSM-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            bot.buy_order_value = Decimal("20")
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("4") - Decimal(i) * Decimal("0.01"), Decimal("5"), status="open")
+                for i in range(60)
+            ] + [
+                Order(f"sell_{j}", "SELL", Decimal("4.5") + Decimal(j) * Decimal("0.02"), Decimal("5"), status="open")
+                for j in range(4)
+            ]
+            created = await bot.create_buy_orders_at_bottom(Decimal("4.60"))
+            assert created == 1
+            mock_exchange.place_limit.assert_called_once()
+            assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 61
 
     def test_get_min_open_orders_for_protection_15(self, temp_dirs, mock_exchange):
         """Порог для защиты «3 BUY → 5 внизу»: при шаге 1.5% = 62."""

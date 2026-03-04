@@ -2173,6 +2173,18 @@ class TradingBot:
                 except Exception as e:
                     log.error("[CHECK_ORDERS] %s | Error handling %s fill for order %s: %s", self._log_prefix(), order.side, order.order_id, e, exc_info=True)
 
+            # Если на бирже 0 SELL при TRADING — запускаем ребаланс (восстановление 5 SELL после маркет-бая)
+            # Иначе при состоянии 57 BUY / 0 SELL ребаланс вызывался только при SELL fill, которого больше не будет
+            if exchange_sell_count == 0 and self.state == BotState.TRADING:
+                open_sell_memory = len([o for o in self.orders if o.side == "SELL" and o.status == "open"])
+                if open_sell_memory == 0:
+                    try:
+                        price = await self.get_current_price()
+                        log.info("[CHECK_ORDERS] %s | 0 SELL on exchange and in memory, triggering rebalancing check", self._log_prefix())
+                        await self.check_rebalancing(price)
+                    except Exception as rebal_err:
+                        log.warning("[CHECK_ORDERS] %s | Rebalancing check failed: %s", self._log_prefix(), rebal_err)
+
         except Exception as e:
             err_msg = str(e)
             if "Circuit breaker" in err_msg or "circuit breaker" in err_msg.lower():

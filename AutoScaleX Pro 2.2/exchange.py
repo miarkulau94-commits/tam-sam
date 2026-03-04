@@ -241,7 +241,11 @@ class BingXSpot:
                         "timeout" in error_msg.lower() or
                         "timed out" in error_msg.lower()
                     )
-                    is_rate_limit = "rate limit" in error_msg.lower() or "too many requests" in error_msg.lower()
+                    is_rate_limit = (
+                        "rate limit" in error_msg.lower()
+                        or "too many requests" in error_msg.lower()
+                        or "frequency limit" in error_msg.lower()  # BingX code 100410
+                    )
                     is_non_critical_error = is_non_critical_api_error(error_msg)
                     # Rate limit ретраим с длинной паузой, не бросаем сразу
                     if is_non_critical_error and not is_rate_limit:

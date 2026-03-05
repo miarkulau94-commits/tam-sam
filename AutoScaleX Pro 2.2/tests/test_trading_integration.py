@@ -718,7 +718,7 @@ class TestTradingCycleIntegration:
 
     @pytest.mark.asyncio
     async def test_check_orders_triggers_rebalancing_when_0_sell_on_exchange_and_memory(self, temp_dirs, mock_exchange):
-        """При 0 SELL на бирже и в памяти в TRADING check_orders вызывает check_rebalancing (57 BUY / 0 SELL)."""
+        """При 0 SELL на бирже и в памяти в TRADING и хотя бы одном исполнении check_orders вызывает check_rebalancing (57 BUY / 0 SELL)."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_0sell")
         os.makedirs(trades_dir, exist_ok=True)
@@ -740,16 +740,52 @@ class TestTradingCycleIntegration:
         ):
             bot = TradingBot(8367409606, "key", "secret", symbol="KSM-USDT")
             bot.state = BotState.TRADING
+            # 56 open BUY + 1 filled (чтобы total_filled > 0 и ребаланс сработал)
             bot.orders = [
                 Order(f"buy_{i}", "BUY", Decimal("4.5") - Decimal(i) * Decimal("0.01"), Decimal("10"), status="open")
-                for i in range(57)
+                for i in range(56)
             ]
+            bot.orders.append(
+                Order("buy_filled", "BUY", Decimal("4.0"), Decimal("10"), status="filled")
+            )
             get_price = AsyncMock(return_value=Decimal("4.93"))
             check_rebal = AsyncMock()
             with patch.object(bot, "get_current_price", get_price), patch.object(bot, "check_rebalancing", check_rebal):
                 await bot.check_orders()
             check_rebal.assert_called_once()
             assert check_rebal.call_args[0][0] == Decimal("4.93")
+
+    @pytest.mark.asyncio
+    async def test_check_orders_skips_rebalancing_when_0_sell_and_no_fills_buy_only_grid(self, temp_dirs, mock_exchange):
+        """При 0 SELL и 0 исполнений (свежая сетка «только BUY») ребаланс не вызывается."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_0sell_0fill")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.open_orders.return_value = [
+            {"orderId": f"buy_{i}", "side": "BUY", "price": str(5.0 - i * 0.01), "origQty": "10", "executedQty": "0"}
+            for i in range(60)
+        ]
+        mock_exchange.balance.return_value = Decimal("500")
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.config.QUOTE", "USDT"),
+            patch("trading_bot.config.BASE", "KSM"),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(8367409606, "key", "secret", symbol="KSM-USDT")
+            bot.state = BotState.TRADING
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("5.0") - Decimal(i) * Decimal("0.01"), Decimal("10"), status="open")
+                for i in range(60)
+            ]
+            check_rebal = AsyncMock()
+            with patch.object(bot, "check_rebalancing", check_rebal):
+                await bot.check_orders()
+            check_rebal.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_protection_add_five_when_three_left_below_threshold_does_nothing(self, temp_dirs, mock_exchange):

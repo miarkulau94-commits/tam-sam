@@ -443,7 +443,12 @@ class TradingBot:
                         log.info(f"🟥 SELL order {i + 1}: Placed at {level_price:.8f}, qty={qty:.8f}")
                         await asyncio.sleep(0.2)
                 except (OSError, RuntimeError, ValueError) as e:
-                    log.warning(f"Failed to place SELL order at {level_price}: {type(e).__name__}: {e}")
+                    log.error(
+                        "[CREATE_GRID_SELL] Failed to place SELL at %s: %s",
+                        level_price,
+                        e,
+                        exc_info=True,
+                    )
             current_sell_price = current_sell_price * (Decimal("1") + self.grid_step_pct)
         return created
 
@@ -1783,7 +1788,12 @@ class TradingBot:
                             log.info(f"🟥 SELL order {i + 1}: ✅ Placed at {level_price:.8f}, qty={qty:.8f}")
                             await asyncio.sleep(0.2)
                     except Exception as e:
-                        log.warning(f"Failed to place SELL order at {level_price}: {e}")
+                        log.error(
+                            "[CREATE_SELL_GRID] Failed to place SELL order at %s: %s",
+                            level_price,
+                            e,
+                            exc_info=True,
+                        )
 
                 current_sell_price = current_sell_price * (Decimal("1") + self.grid_step_pct)
 
@@ -2175,15 +2185,23 @@ class TradingBot:
 
             # Если на бирже 0 SELL при TRADING — запускаем ребаланс (восстановление 5 SELL после маркет-бая)
             # Иначе при состоянии 57 BUY / 0 SELL ребаланс вызывался только при SELL fill, которого больше не будет
+            # Не ребалансить, если ни разу не было исполнений: это свежая сетка "60 BUY + 0 SELL" (SELL создаются после первого BUY fill)
             if exchange_sell_count == 0 and self.state == BotState.TRADING:
                 open_sell_memory = len([o for o in self.orders if o.side == "SELL" and o.status == "open"])
                 if open_sell_memory == 0:
-                    try:
-                        price = await self.get_current_price()
-                        log.info("[CHECK_ORDERS] %s | 0 SELL on exchange and in memory, triggering rebalancing check", self._log_prefix())
-                        await self.check_rebalancing(price)
-                    except Exception as rebal_err:
-                        log.warning("[CHECK_ORDERS] %s | Rebalancing check failed: %s", self._log_prefix(), rebal_err)
+                    total_filled = len([o for o in self.orders if o.status == "filled"])
+                    if total_filled == 0:
+                        log.debug(
+                            "[CHECK_ORDERS] %s | 0 SELL but no fills yet (BUY-only grid), skipping rebalancing until first BUY fill",
+                            self._log_prefix(),
+                        )
+                    else:
+                        try:
+                            price = await self.get_current_price()
+                            log.info("[CHECK_ORDERS] %s | 0 SELL on exchange and in memory, triggering rebalancing check", self._log_prefix())
+                            await self.check_rebalancing(price)
+                        except Exception as rebal_err:
+                            log.warning("[CHECK_ORDERS] %s | Rebalancing check failed: %s", self._log_prefix(), rebal_err)
 
         except Exception as e:
             err_msg = str(e)

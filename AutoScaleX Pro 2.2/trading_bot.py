@@ -150,6 +150,13 @@ class TradingBot:
                     self.grid_step_pct = config.GRID_STEP_PCT
                     log.warning(f"Grid step was invalid ({saved_grid_step}), resetting to default {config.GRID_STEP_PCT}")
 
+                # Защита от ошибочного шага 0.65% (не предлагается в UI; часто из-за сохранённого "0.65")
+                if self.grid_step_pct == Decimal("0.0065") or self.grid_step_pct == Decimal("0.65"):
+                    log.warning(
+                        f"grid_step_pct {self.grid_step_pct} (0.65%) is not a valid option, possible corrupt state — resetting to default {config.GRID_STEP_PCT}"
+                    )
+                    self.grid_step_pct = config.GRID_STEP_PCT
+
                 log.info(f"Final grid_step_pct: {self.grid_step_pct} ({self.grid_step_pct * 100:.2f}%)")
                 saved_buy_order_value = Decimal(str(state.get("buy_order_value", str(config.BUY_ORDER_VALUE))))
                 # Проверяем что buy_order_value больше 0, иначе используем значение по умолчанию
@@ -990,6 +997,32 @@ class TradingBot:
                 step = info["stepSize"]
                 tick = info["tickSize"]
                 new_price = (new_price // tick) * tick
+
+                # Защита от дубля: если на основной цене уже есть BUY — пробуем запасной шаг (1% при шаге 1.5%, 0.5% при 0.75%)
+                existing_buy = any(o.side == "BUY" and abs(o.price - new_price) < tick and o.status == "open" for o in self.orders)
+                if existing_buy:
+                    fallback_step_pct = None
+                    if self.grid_step_pct is not None:
+                        step_float = float(self.grid_step_pct)
+                        if abs(step_float - 0.015) < 0.0001:
+                            fallback_step_pct = Decimal("0.01")  # 1%
+                        elif abs(step_float - 0.0075) < 0.0001:
+                            fallback_step_pct = Decimal("0.005")  # 0.5%
+                    if fallback_step_pct is not None:
+                        fallback_price = (lowest_order.price * (Decimal("1") - fallback_step_pct) // tick) * tick
+                        existing_at_fallback = any(
+                            o.side == "BUY" and abs(o.price - fallback_price) < tick and o.status == "open" for o in self.orders
+                        )
+                        if not existing_at_fallback:
+                            log.info(
+                                f"[PYRAMIDING] BUY already at {new_price:.8f}, using fallback step {fallback_step_pct}: price={fallback_price:.8f}"
+                            )
+                            new_price = fallback_price
+                            existing_buy = False
+                    if existing_buy:
+                        log.debug(f"[PYRAMIDING] Skipping: BUY order already exists at price {new_price:.8f}")
+                        break
+
                 qty = (self.buy_order_value / new_price).quantize(step, rounding=ROUND_DOWN)
 
                 rebalance_notional = qty * new_price

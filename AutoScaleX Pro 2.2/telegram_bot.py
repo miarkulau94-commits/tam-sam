@@ -1060,6 +1060,9 @@ class TelegramBotManager:
         # Конвертируем только если сохранено как процент (0.75 или 1.5), НЕ десятичное (0.0075, 0.015)
         if saved_grid_step and saved_grid_step >= Decimal("0.5"):
             saved_grid_step = saved_grid_step / Decimal("100")
+        # Не применять ошибочный шаг 0.65% (в UI только 0.75% и 1.5%)
+        if saved_grid_step in (Decimal("0.0065"), Decimal("0.65")):
+            saved_grid_step = config.GRID_STEP_PCT
 
         await query.edit_message_text("🔄 Создание бота и построение сетки...")
 

@@ -14,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config
 from trading_bot import BotState, Order, TradingBot
 
 
@@ -148,6 +149,58 @@ class TestTradingBotWithMockedExchange:
             assert len(bot.orders) == 2
             assert bot.orders[0].order_id == "id1"
             assert bot.orders[1].order_id == "id2"
+
+    def test_load_state_resets_grid_step_when_saved_065(self, temp_dirs, mock_exchange):
+        """При загрузке state с grid_step_pct '0.65' (ошибочный шаг) бот сбрасывает на config.GRID_STEP_PCT."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_grid065")
+        os.makedirs(trades_dir, exist_ok=True)
+        state_file = os.path.join(state_dir, "user_12345.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            import json
+            json.dump({
+                "uid": "12345",
+                "symbol": "ETH-USDT",
+                "grid_step_pct": "0.65",
+                "orders": [],
+                "buy_order_value": "50",
+            }, f)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+        assert bot.grid_step_pct == config.GRID_STEP_PCT
+
+    def test_load_state_resets_grid_step_when_saved_00065(self, temp_dirs, mock_exchange):
+        """При загрузке state с grid_step_pct '0.0065' (0.65%) бот сбрасывает на config.GRID_STEP_PCT."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_grid00065")
+        os.makedirs(trades_dir, exist_ok=True)
+        state_file = os.path.join(state_dir, "user_12345.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            import json
+            json.dump({
+                "uid": "12345",
+                "symbol": "ETH-USDT",
+                "grid_step_pct": "0.0065",
+                "orders": [],
+                "buy_order_value": "50",
+            }, f)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+        assert bot.grid_step_pct == config.GRID_STEP_PCT
 
 
 class TestTradingCycleIntegration:
@@ -523,6 +576,152 @@ class TestTradingCycleIntegration:
             placed_price = mock_exchange.place_limit.call_args[0][3]
             assert placed_price == Decimal("1.99")
             assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 2
+
+
+class TestPyramidingFallback:
+    """Тесты запасного шага в пирамидинге: при занятой основной цене — 1% (при шаге 1.5%) или 0.5% (при 0.75%)."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.fixture
+    def mock_exchange(self):
+        ex = MagicMock()
+        ex.balance.return_value = Decimal("1000")
+        ex.available_balance.return_value = Decimal("1000")
+        ex.open_orders.return_value = []
+        ex.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        ex.circuit_breaker = MagicMock()
+        ex.circuit_breaker.state = MagicMock()
+        ex.invalidate_balance_cache = MagicMock(return_value=None)
+        ex.place_limit = MagicMock(return_value={"orderId": "pyramid_buy_1"})
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_pyramiding_uses_fallback_15_when_main_price_occupied(self, temp_dirs, mock_exchange):
+        """Пирамидинг при шаге 1.5%: при [1.50, 1.47] добавляется следующий уровень 1.44 (lowest - 1.5%)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_pyr_fb15")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
+            bot.grid_step_pct = Decimal("0.015")  # 1.5%
+            bot.buy_order_value = Decimal("50")
+            bot.profit_bank = Decimal("50")
+            # lowest=1.47 -> следующий уровень 1.47*0.985=1.44
+            bot.orders = [
+                Order("a", "BUY", Decimal("1.50"), Decimal("10"), status="open"),
+                Order("b", "BUY", Decimal("1.47"), Decimal("10"), status="open"),
+            ]
+            await bot.check_pyramiding()
+        mock_exchange.place_limit.assert_called_once()
+        placed_price = mock_exchange.place_limit.call_args[0][3]
+        assert placed_price == Decimal("1.44"), "Следующий уровень сетки 1.47 - 1.5% = 1.44"
+
+    @pytest.mark.asyncio
+    async def test_pyramiding_uses_fallback_075_when_main_price_occupied(self, temp_dirs, mock_exchange):
+        """Пирамидинг при шаге 0.75%: при [2.00, 1.98] добавляется следующий уровень 1.96 (lowest - 0.75%)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_pyr_fb075")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
+            bot.grid_step_pct = Decimal("0.0075")  # 0.75%
+            bot.buy_order_value = Decimal("50")
+            bot.profit_bank = Decimal("50")
+            # lowest=1.98 -> следующий уровень 1.98*0.9925=1.96
+            bot.orders = [
+                Order("a", "BUY", Decimal("2.00"), Decimal("10"), status="open"),
+                Order("b", "BUY", Decimal("1.98"), Decimal("10"), status="open"),
+            ]
+            await bot.check_pyramiding()
+        mock_exchange.place_limit.assert_called_once()
+        placed_price = mock_exchange.place_limit.call_args[0][3]
+        assert placed_price == Decimal("1.96"), "Следующий уровень сетки 1.98 - 0.75% = 1.96"
+
+    @pytest.mark.asyncio
+    async def test_pyramiding_skips_when_both_main_and_fallback_occupied(self, temp_dirs, mock_exchange):
+        """Пирамидинг: при занятых основной и запасной для одного уровня — ставим следующий уровень (lowest=1.47 -> 1.44)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_pyr_skip")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            bot.buy_order_value = Decimal("50")
+            bot.profit_bank = Decimal("50")
+            # [1.50, 1.47, 1.48] -> lowest=1.47, следующий уровень 1.44 (свободен) — один ордер по 1.44
+            bot.orders = [
+                Order("lowest", "BUY", Decimal("1.50"), Decimal("10"), status="open"),
+                Order("main_occupied", "BUY", Decimal("1.47"), Decimal("10"), status="open"),
+                Order("fallback_occupied", "BUY", Decimal("1.48"), Decimal("10"), status="open"),
+            ]
+            await bot.check_pyramiding()
+        mock_exchange.place_limit.assert_called_once()
+        placed_price = mock_exchange.place_limit.call_args[0][3]
+        assert placed_price == Decimal("1.44"), "Следующий уровень ниже 1.47 — 1.44"
+
+
+class TestTradingCycleIntegrationContinued:
+    """Продолжение TestTradingCycleIntegration: тесты, следующие за TestPyramidingFallback в файле."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.fixture
+    def mock_exchange(self):
+        ex = MagicMock()
+        ex.balance.return_value = Decimal("1000")
+        ex.available_balance.return_value = Decimal("1000")
+        ex.open_orders.return_value = []
+        ex.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        ex.circuit_breaker = MagicMock()
+        ex.circuit_breaker.state = MagicMock()
+        ex.invalidate_balance_cache = MagicMock(return_value=None)
+        ex.place_limit = MagicMock(return_value={"orderId": "new_sell_123"})
+        return ex
 
     @pytest.mark.asyncio
     async def test_handle_sell_filled_at_max_profit_still_added_no_new_buy(self, temp_dirs, mock_exchange):

@@ -625,7 +625,8 @@ class TelegramBotManager:
             if bot.state == BotState.TRADING:
                 keyboard = self._get_main_menu_keyboard()
                 if open_orders:
-                    await query.edit_message_text(
+                    await _safe_edit_message(
+                        query,
                         "⚠️ Бот уже запущен и работает!\n\n"
                         f"Открыто ордеров: {len(open_orders)}\n\n"
                         "Используйте команды:\n"
@@ -634,22 +635,23 @@ class TelegramBotManager:
                         reply_markup=keyboard,
                     )
                 else:
-                    await query.edit_message_text("⚠️ Бот уже запущен и работает", reply_markup=keyboard)
+                    await _safe_edit_message(query, "⚠️ Бот уже запущен и работает", reply_markup=keyboard)
                 return
             elif bot.state == BotState.PAUSED:
                 keyboard = self._get_back_keyboard()
                 if open_orders:
                     bot.state = BotState.TRADING
-                    await query.edit_message_text("▶️ Торговля возобновлена", reply_markup=keyboard)
+                    await _safe_edit_message(query, "▶️ Торговля возобновлена", reply_markup=keyboard)
                 else:
                     bot.state = BotState.TRADING
-                    await query.edit_message_text("▶️ Торговля возобновлена", reply_markup=keyboard)
+                    await _safe_edit_message(query, "▶️ Торговля возобновлена", reply_markup=keyboard)
                 return
 
         # Загружаем API ключи через единый метод
         api_key, secret = await asyncio.to_thread(self._load_api_keys_for_user, user_id, uid)
         if not api_key or not secret:
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "❌ Не настроены API ключи.\n\nИспользуйте кнопку '🔑 Ввести API ключи' для настройки.",
                 reply_markup=self._get_main_menu_keyboard(),
             )
@@ -659,7 +661,7 @@ class TelegramBotManager:
         state = await asyncio.to_thread(self.persistence.load_state, user_id)
 
         # Проверяем ключи и получаем баланс (синхронный HTTP — в потоке)
-        await query.edit_message_text("🔄 Проверка API ключей...")
+        await _safe_edit_message(query, "🔄 Проверка API ключей...")
 
         saved_symbol = (state.get("symbol") if state else None) or config.SYMBOL
 
@@ -707,7 +709,7 @@ class TelegramBotManager:
                 ]
             )
 
-            await query.edit_message_text(balance_message, parse_mode="Markdown", reply_markup=keyboard)
+            await _safe_edit_message(query, balance_message, parse_mode="Markdown", reply_markup=keyboard)
 
             # Сохраняем состояние "готов к настройке" (ключи проверены, баланс показан)
             # Теперь пользователь должен выбрать настройки и только потом построить сетку
@@ -719,7 +721,7 @@ class TelegramBotManager:
                 error_msg = "❌ Ошибка: API ключ не имеет разрешения на Spot Trading.\n\nВключите разрешение 'Spot Trading' для вашего API ключа в настройках BingX."
             else:
                 error_msg = f"❌ Ошибка проверки ключей: {error_msg}\n\nПроверьте правильность API ключей."
-            await query.edit_message_text(error_msg, reply_markup=self._get_back_keyboard())
+            await _safe_edit_message(query, error_msg, reply_markup=self._get_back_keyboard())
 
     async def handle_pause_bot(self, query, user_id: int):
         """Обработка паузы"""

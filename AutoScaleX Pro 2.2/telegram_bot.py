@@ -812,11 +812,19 @@ class TelegramBotManager:
             return
 
         try:
+            # Подтягиваем состояние с диска, чтобы Profit Bank и initial_equity были актуальными
+            await asyncio.to_thread(bot.load_state)
+
             price = await bot.get_current_price()
             quote_balance = await bot.ex.balance(bot.quote_asset_name)
             base_balance = await bot.ex.balance(bot.base_asset_name)
             base_in_quote = base_balance * price
             total_equity = await bot.get_total_equity(price)
+
+            # Если начальный капитал не задан — фиксируем текущий итог как базовый уровень и сохраняем
+            if bot.initial_equity <= 0:
+                bot.initial_equity = total_equity
+                await asyncio.to_thread(bot.save_state)
 
             if bot.initial_equity > 0:
                 profit = total_equity - bot.initial_equity
@@ -838,7 +846,7 @@ class TelegramBotManager:
 
             keyboard = self._get_back_keyboard()
 
-            await query.edit_message_text(message, parse_mode="Markdown", reply_markup=keyboard)
+            await _safe_edit_message(query, message, parse_mode="Markdown", reply_markup=keyboard)
         except Exception as e:
             err_msg = str(e)
             if "Circuit breaker" in err_msg or "circuit breaker" in err_msg.lower():

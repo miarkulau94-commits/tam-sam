@@ -258,6 +258,38 @@ class TestTradingCycleIntegration:
             assert bot.total_executed_buys == initial_buys + 1
 
     @pytest.mark.asyncio
+    async def test_handle_buy_filled_uses_available_balance_for_sell_qty(self, temp_dirs, mock_exchange):
+        """При создании SELL после BUY используется available_balance(base) с биржи для объёма."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_avail")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.side_effect = lambda a: Decimal("0.5") if "ETH" in a else Decimal("900")
+        mock_exchange.available_balance.return_value = Decimal("0.01")  # free ETH для SELL
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0005"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        mock_exchange.place_limit.return_value = {"orderId": "sell_after_buy_1"}
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            order = Order("buy1", "BUY", Decimal("100"), Decimal("0.005"), status="open")
+            order.amount_usdt = Decimal("50")
+            await bot.handle_buy_filled(order, Decimal("100"))
+        mock_exchange.available_balance.assert_called()
+        calls = [c[0][0] for c in mock_exchange.available_balance.call_args_list]
+        assert "ETH" in calls, "available_balance должен вызываться для базового актива (ETH)"
+
+    @pytest.mark.asyncio
     async def test_handle_sell_filled_adds_profit(self, temp_dirs, mock_exchange):
         """После handle_sell_filled profit_bank увеличивается."""
         state_dir, user_data_dir = temp_dirs

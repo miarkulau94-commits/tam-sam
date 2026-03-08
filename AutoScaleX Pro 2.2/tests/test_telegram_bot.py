@@ -5,6 +5,7 @@ Unit tests for telegram_bot — _is_error_notification, _safe_edit_message, hand
 import os
 import sys
 import tempfile
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -470,3 +471,103 @@ class TestMainMenuKeyboard:
         kb = mgr._get_main_menu_keyboard()
         flat = [b.callback_data for row in kb.inline_keyboard for b in row]
         assert "set_api_keys" in flat
+
+
+# --- handle_balance ---
+
+
+@pytest.mark.asyncio
+class TestHandleBalance:
+    """Тесты handle_balance — экран «💰 Баланс», initial_equity и Profit Bank."""
+
+    async def test_balance_sets_initial_equity_when_zero_and_saves_state(self):
+        """При initial_equity=0 выставляется базовый уровень (total_equity) и вызывается save_state."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.initial_equity = Decimal("0")
+        mock_bot.profit_bank = Decimal("18.62")
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "KSM"
+        mock_bot.symbol = "KSM-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("4.51"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("1295.07"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("1085.58"), Decimal("46.449665")])
+
+        def run_in_thread(fn, *args):
+            return fn(*args)
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=run_in_thread):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                        await mgr.handle_balance(query, 123)
+
+        mock_bot.load_state.assert_called_once()
+        assert mock_bot.initial_equity == Decimal("1295.07")
+        mock_bot.save_state.assert_called_once()
+        safe_edit.assert_called_once()
+        msg = safe_edit.call_args[0][1]
+        assert "Прибыль: `0.00" in msg
+        assert "Profit Bank: `18.62" in msg
+        assert "1295.07" in msg
+
+    async def test_balance_shows_profit_and_roi_when_initial_equity_set(self):
+        """При initial_equity > 0 в сообщении считаются прибыль и ROI."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.initial_equity = Decimal("1000")
+        mock_bot.profit_bank = Decimal("5.00")
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "ETH"
+        mock_bot.symbol = "ETH-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("2000"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("1100"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("100"), Decimal("0.5")])
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=lambda fn, *a: fn(*a)):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                        await mgr.handle_balance(query, 456)
+
+        msg = safe_edit.call_args[0][1]
+        assert "Прибыль: `100.00" in msg
+        assert "10.00%" in msg
+        assert "Profit Bank: `5.00" in msg
+
+    async def test_balance_calls_load_state_before_building_message(self):
+        """Перед построением сообщения вызывается bot.load_state."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.initial_equity = Decimal("500")
+        mock_bot.profit_bank = Decimal("0")
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "DOT"
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("8"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("600"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("200"), Decimal("50")])
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=lambda fn, *a: fn(*a)):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock):
+                        await mgr.handle_balance(query, 789)
+
+        mock_bot.load_state.assert_called_once()

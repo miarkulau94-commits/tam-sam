@@ -747,19 +747,16 @@ class TradingBot:
                 sell_price = (sell_price // tick) * tick
                 log.info(f"[CREATE_SELL_AFTER_BUY] Calculated SELL price: {price:.8f} * (1 + {self.grid_step_pct:.6f}) = {sell_price:.8f}")
 
-                # Используем реальное количество базового актива, полученное после исполнения BUY
-                # Проверяем текущий баланс для более точного расчета
+                # Доступный объём для SELL — реальный free с биржи (избегаем занижения из-за расхождения памяти и биржи)
                 current_base_balance = await self.ex.balance(self.base_asset_name)
-                open_sell_orders = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
-                locked_base_asset = sum(o.qty for o in open_sell_orders)
-                available_base_asset = current_base_balance - locked_base_asset
+                available_base_asset = await self.ex.available_balance(self.base_asset_name)
 
                 log.info(
-                    f"[CREATE_SELL_AFTER_BUY] Balance check: current={current_base_balance:.8f}, locked={locked_base_asset:.8f}, available={available_base_asset:.8f}, btc_received={btc_received:.8f}"
+                    f"[CREATE_SELL_AFTER_BUY] Balance check: total={current_base_balance:.8f}, available(free)={available_base_asset:.8f}, btc_received={btc_received:.8f}"
                 )
 
                 # Используем количество из исполненного BUY ордера (реальное количество после комиссии)
-                # Но не больше доступного баланса
+                # Но не больше доступного баланса по бирже
                 sell_qty = min(btc_received, available_base_asset)
                 sell_qty = (sell_qty // step) * step  # Округляем до шага
 
@@ -789,7 +786,7 @@ class TradingBot:
                         log.warning(f"[CREATE_SELL_AFTER_BUY] FAILED: SELL order notional too small: {sell_notional:.8f} < {required_notional:.8f}")
                     elif available_base_asset < sell_qty:
                         log.warning(
-                            f"[CREATE_SELL_AFTER_BUY] FAILED: Insufficient base asset: available={available_base_asset:.8f}, needed={sell_qty:.8f}, current_balance={current_base_balance:.8f}, locked={locked_base_asset:.8f}"
+                            f"[CREATE_SELL_AFTER_BUY] FAILED: Insufficient base asset: available={available_base_asset:.8f}, needed={sell_qty:.8f}, total_balance={current_base_balance:.8f}"
                         )
                     else:
                         if self.state == BotState.STOPPED:

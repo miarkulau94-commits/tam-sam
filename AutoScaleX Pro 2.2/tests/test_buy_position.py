@@ -94,3 +94,46 @@ class TestPositionManager:
         n = pm.restore_from_trades(trades, Decimal("0.001"), symbol="ETH-USDT")
         assert n == 1
         assert pm.get_total_qty() == Decimal("1")
+
+    def test_restore_from_trades_then_next_sell_profit_correct(self):
+        """После restore из истории BUY+SELL следующий SELL даёт корректный profit (не ноль, не завышенный)."""
+        pm = PositionManager()
+        fee = Decimal("0.001")
+        trades = [
+            {"type": "BUY", "price": "100", "qty": "2", "timestamp": "2025-01-01T00:00:00", "symbol": "ETH-USDT"},
+            {"type": "SELL", "price": "105", "qty": "1", "timestamp": "2025-01-01T01:00:00", "symbol": "ETH-USDT"},
+        ]
+        n = pm.restore_from_trades(trades, fee, symbol="ETH-USDT")
+        assert n == 1
+        assert pm.get_total_qty() == Decimal("1")
+        # Следующая продажа 1 по 110: себестоимость оставшейся позиции 100, выручка 110*(1-fee) -> profit > 0
+        profit = pm.calculate_profit_for_sell(Decimal("1"), Decimal("110"), fee)
+        assert profit > 0
+        assert profit < Decimal("15")  # разумный порядок (≈10 минус комиссия)
+
+    def test_restore_from_trades_without_restore_sell_gives_zero_profit(self):
+        """Без restore при пустых positions calculate_profit_for_sell возвращает 0 (защита от «призрачной» прибыли)."""
+        pm = PositionManager()
+        # Не вызываем restore, positions пустые
+        profit = pm.calculate_profit_for_sell(Decimal("1"), Decimal("110"), Decimal("0.001"))
+        assert profit == Decimal("0")
+
+    def test_calculate_profit_for_sell_negative_when_sell_below_fifo_cost(self):
+        """FIFO: продажа по цене ниже старых покупок даёт отрицательный profit (ожидаемое поведение)."""
+        pm = PositionManager()
+        pm.add_position(Decimal("100"), Decimal("1"))
+        pm.add_position(Decimal("90"), Decimal("1"))
+        profit = pm.calculate_profit_for_sell(Decimal("1"), Decimal("85"), Decimal("0.001"))
+        assert profit < 0
+        assert pm.get_total_qty() == Decimal("1")
+
+    def test_restore_from_trades_returns_remaining_positions_count(self):
+        """restore_from_trades возвращает количество оставшихся позиций после проигрывания истории."""
+        pm = PositionManager()
+        trades = [
+            {"type": "BUY", "price": "10", "qty": "3", "timestamp": "2025-01-01T00:00:00", "symbol": "X-USDT"},
+            {"type": "SELL", "price": "11", "qty": "2", "timestamp": "2025-01-01T01:00:00", "symbol": "X-USDT"},
+        ]
+        n = pm.restore_from_trades(trades, Decimal("0"), symbol="X-USDT")
+        assert n == 1
+        assert pm.get_total_qty() == Decimal("1")

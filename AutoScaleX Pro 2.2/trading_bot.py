@@ -2289,6 +2289,16 @@ class TradingBot:
                             if self.initial_equity == 0:
                                 self.initial_equity = await self.get_total_equity(price)
 
+                            # Восстанавливаем FIFO-позиции из истории сделок, чтобы profit при следующих SELL считался верно
+                            if self.statistics and getattr(self.statistics, "trades", None):
+                                n_restored = await asyncio.to_thread(
+                                    self.position_manager.restore_from_trades,
+                                    self.statistics.trades,
+                                    config.FEE_RATE,
+                                    self.symbol,
+                                )
+                                log.info("[MAIN_LOOP] %s | PositionManager restored from %s trades (%s positions)", self._log_prefix(), len(self.statistics.trades), n_restored)
+
                             self.state = BotState.TRADING
                             await asyncio.to_thread(self.save_state)  # чтобы при перезапуске сработало авто-восстановление
                             log.info(

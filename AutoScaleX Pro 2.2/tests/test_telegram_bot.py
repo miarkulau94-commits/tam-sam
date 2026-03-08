@@ -571,3 +571,76 @@ class TestHandleBalance:
                         await mgr.handle_balance(query, 789)
 
         mock_bot.load_state.assert_called_once()
+
+    async def test_balance_profit_bank_from_trades_for_current_symbol(self):
+        """Profit Bank в «Баланс» считается по сумме profit из SELL-сделок по текущей паре."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.initial_equity = Decimal("1000")
+        mock_bot.profit_bank = Decimal("99")  # из state — не должен использоваться при наличии сделок
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "KSM"
+        mock_bot.symbol = "KSM-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("4.51"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("1295"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("1085"), Decimal("46")])
+        mock_bot.statistics = MagicMock()
+        mock_bot.statistics.trades = [
+            {"type": "SELL", "symbol": "KSM-USDT", "profit": "1.50"},
+            {"type": "SELL", "symbol": "KSM-USDT", "profit": "2.20"},
+            {"type": "BUY", "symbol": "KSM-USDT", "profit": "0"},
+            {"type": "SELL", "symbol": "ETH-USDT", "profit": "5.00"},
+        ]
+        mock_bot.statistics._load_trades_from_file = MagicMock()
+
+        def run_in_thread(fn, *args):
+            return fn(*args)
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=run_in_thread):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                        await mgr.handle_balance(query, 111)
+
+        mock_bot.statistics._load_trades_from_file.assert_called_once()
+        msg = safe_edit.call_args[0][1]
+        # Сумма profit только по SELL по KSM-USDT: 1.50 + 2.20 = 3.70 (ETH не считаем)
+        assert "Profit Bank: `3.70" in msg
+
+    async def test_balance_profit_bank_fallback_to_state_when_no_sell_trades(self):
+        """Если по текущей паре нет SELL-сделок, Profit Bank берётся из state."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.initial_equity = Decimal("500")
+        mock_bot.profit_bank = Decimal("12.34")
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "DOT"
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("8"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("600"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("100"), Decimal("62.5")])
+        mock_bot.statistics = MagicMock()
+        mock_bot.statistics.trades = []  # нет сделок по паре
+        mock_bot.statistics._load_trades_from_file = MagicMock()
+
+        def run_in_thread(fn, *args):
+            return fn(*args)
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=run_in_thread):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                        await mgr.handle_balance(query, 222)
+
+        msg = safe_edit.call_args[0][1]
+        assert "Profit Bank: `12.34" in msg

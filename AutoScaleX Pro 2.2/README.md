@@ -113,7 +113,7 @@ python main.py
 
 - **Выбрать монету** — выбор торговой пары (BTC-USDT, ETH-USDT и т.д.)
 - **Шаг сетки**: 0.75% (до 125 BUY, всего 130 ордеров) или 1.5% (до 60 BUY, всего 65 ордеров)
-- **Размер ордера**: 10, 20, 50, 75, 100 или 250 USDT
+- **Размер ордера**: 10, 20, 35, 50, 75, 100 или 250 USDT
 - **Построить сетку** — перестроить сетку вручную
 - **Ребалансировать SELL** — перестроить SELL сетку от VWAP (3 ордера)
 
@@ -189,10 +189,13 @@ python main.py
 
 Все ордера и настройки сохраняются в файлы:
 - `user_states/user_{user_id}.json` — состояние пользователя
+- `user_data/<uid>.json` — сделки и profit_bank по UID
 - `trades_{user_id}.csv` — история сделок
 - `statistics_{user_id}.json` — статистика
 
-При перезапуске бот автоматически восстанавливает состояние.
+При перезапуске бот автоматически восстанавливает состояние. При возобновлении с существующими ордерами на бирже FIFO-позиции восстанавливаются из истории сделок (`restore_from_trades`), чтобы расчёт прибыли по следующим SELL был корректным.
+
+**Исправление ошибочного profit в истории:** скрипт `scripts/fix_profit_bank_ksm.py` — однократная правка файла сделок (обнуление ошибочного profit по одной SELL и пересчёт profit_bank). Запуск: `python scripts/fix_profit_bank_ksm.py path/to/user_data/<uid>.json`
 
 ## Структура проекта
 
@@ -205,7 +208,7 @@ AutoScaleX Pro 2.2/
 ├── telegram_bot.py      # Telegram интерфейс
 ├── referral_system.py   # Реферальная система
 ├── persistence.py       # Сохранение состояния
-├── buy_position.py      # FIFO позиции
+├── buy_position.py      # FIFO позиции и restore_from_trades
 ├── order_manager.py     # Ордера и дедупликация
 ├── statistics.py        # Статистика
 ├── error_handling.py    # Обработка ошибок и уведомления
@@ -216,6 +219,7 @@ AutoScaleX Pro 2.2/
 ├── ORDER_EXECUTION_LOGIC.md  # Исполнение ордеров
 ├── SELL_REBALANCING.md  # Ребалансировка SELL
 ├── GRID_PROTECTION.md   # Защита большой сетки
+├── scripts/             # Скрипты (fix_profit_bank_ksm и др.)
 └── tests/               # Unit-тесты
 ```
 

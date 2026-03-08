@@ -473,6 +473,51 @@ class TestMainMenuKeyboard:
         assert "set_api_keys" in flat
 
 
+@pytest.mark.asyncio
+class TestSettingsMenuOrderValues:
+    """Кнопки размера ордера в настройках (в т.ч. 35 USDT)."""
+
+    async def test_settings_menu_has_order_value_35(self):
+        """Меню настроек содержит кнопку «Ордер 35 USDT»."""
+        mgr = TelegramBotManager()
+        state = {"uid": "123", "symbol": "BTC-USDT", "grid_step_pct": 0.0075}
+        mgr.persistence.load_state = lambda uid: state
+        query = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        async def to_thread(fn, *args):
+            if getattr(fn, "__name__", "") == "_load_api_keys_for_user":
+                return ("key", "secret")
+            return fn(*args)
+
+        with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=to_thread):
+            await mgr.show_settings_menu(query, 100)
+
+        call_kw = query.edit_message_text.call_args[1]
+        kb = call_kw.get("reply_markup")
+        assert kb is not None
+        flat = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert "order_value_35" in flat
+
+    async def test_callback_order_value_35_calls_handler_with_35(self):
+        """При нажатии «Ордер 35 USDT» вызывается handle_set_order_value с value=35."""
+        mgr = TelegramBotManager()
+        mgr.persistence.load_state = lambda uid: {"uid": "123"}
+        query = AsyncMock()
+        query.data = "order_value_35"
+        query.from_user.id = 100
+        query.edit_message_text = AsyncMock()
+        update = AsyncMock()
+        update.callback_query = query
+        context = AsyncMock()
+
+        with patch.object(mgr, "handle_set_order_value", new_callable=AsyncMock) as handle_order:
+            with patch.object(mgr.referral_system, "is_referral", return_value=True):
+                await mgr.callback_handler(update, context)
+        handle_order.assert_called_once()
+        assert handle_order.call_args[0][2] == 35
+
+
 # --- handle_balance ---
 
 

@@ -953,6 +953,7 @@ class TelegramBotManager:
                 [
                     InlineKeyboardButton("💵 Ордер 10 USDT", callback_data="order_value_10"),
                     InlineKeyboardButton("💵 Ордер 20 USDT", callback_data="order_value_20"),
+                    InlineKeyboardButton("💵 Ордер 35 USDT", callback_data="order_value_35"),
                     InlineKeyboardButton("💵 Ордер 50 USDT", callback_data="order_value_50"),
                 ],
                 [

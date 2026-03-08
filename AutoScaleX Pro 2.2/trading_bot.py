@@ -115,6 +115,15 @@ class TradingBot:
                     self.statistics = Statistics(csv_file=csv_path, json_file=json_path, uid=self.uid, persistence=self.persistence)
 
                 self.profit_bank = Decimal(str(state.get("profit_bank", "0")))
+                # Источник истины для profit_bank — user_data/<uid>.json (сделки); подменяем из него при загрузке
+                if self.uid:
+                    try:
+                        ud = self.persistence.load_user_trades(self.uid)
+                        if ud.get("settings") and "profit_bank" in ud["settings"]:
+                            self.profit_bank = Decimal(str(ud["settings"]["profit_bank"]))
+                            log.debug(f"profit_bank loaded from user_data: {self.profit_bank}")
+                    except (TypeError, ValueError, OSError) as e:
+                        log.debug(f"Could not load profit_bank from user_data: {e}")
                 self.total_executed_buys = state.get("total_executed_buys", 0)
                 self.total_executed_sells = state.get("total_executed_sells", 0)
                 self.initial_equity = Decimal(str(state.get("initial_equity", "0")))

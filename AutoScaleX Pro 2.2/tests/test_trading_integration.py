@@ -202,6 +202,42 @@ class TestTradingBotWithMockedExchange:
             bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
         assert bot.grid_step_pct == config.GRID_STEP_PCT
 
+    def test_load_state_profit_bank_from_user_data_overrides_state(self, temp_dirs, mock_exchange):
+        """При загрузке state profit_bank подменяется из user_data/<uid>.json (источник истины)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_profit_bank")
+        os.makedirs(trades_dir, exist_ok=True)
+        state_file = os.path.join(state_dir, "user_12345.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            import json
+            json.dump({
+                "uid": "35812365",
+                "symbol": "KSM-USDT",
+                "grid_step_pct": "0.0075",
+                "profit_bank": "18.62247060161",
+                "orders": [],
+                "buy_order_value": "50",
+            }, f)
+        uid_file = os.path.join(user_data_dir, "35812365.json")
+        with open(uid_file, "w", encoding="utf-8") as f:
+            import json
+            json.dump({
+                "uid": "35812365",
+                "trades": [],
+                "settings": {"profit_bank": "-1.84514217971"},
+                "total_trades": 0,
+            }, f)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="KSM-USDT")
+        assert bot.profit_bank == Decimal("-1.84514217971")
+
 
 class TestTradingCycleIntegration:
     """Интеграционные тесты полного торгового цикла (handle_buy_filled, handle_sell_filled, sync)."""

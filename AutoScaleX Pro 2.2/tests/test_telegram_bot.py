@@ -572,14 +572,14 @@ class TestHandleBalance:
 
         mock_bot.load_state.assert_called_once()
 
-    async def test_balance_profit_bank_from_trades_for_current_symbol(self):
-        """Profit Bank в «Баланс» считается по сумме profit из SELL-сделок по текущей паре."""
+    async def test_balance_profit_bank_from_state_same_as_pyramiding(self):
+        """Profit Bank в «Баланс» — то же значение из state, что используется для пирамидинга."""
         mgr = TelegramBotManager()
         query = AsyncMock()
 
         mock_bot = MagicMock()
         mock_bot.initial_equity = Decimal("1000")
-        mock_bot.profit_bank = Decimal("99")  # из state — не должен использоваться при наличии сделок
+        mock_bot.profit_bank = Decimal("18.38")  # из state = то, от чего срабатывает пирамидинг
         mock_bot.quote_asset_name = "USDT"
         mock_bot.base_asset_name = "KSM"
         mock_bot.symbol = "KSM-USDT"
@@ -589,14 +589,6 @@ class TestHandleBalance:
         mock_bot.get_total_equity = AsyncMock(return_value=Decimal("1295"))
         mock_bot.ex = MagicMock()
         mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("1085"), Decimal("46")])
-        mock_bot.statistics = MagicMock()
-        mock_bot.statistics.trades = [
-            {"type": "SELL", "symbol": "KSM-USDT", "profit": "1.50"},
-            {"type": "SELL", "symbol": "KSM-USDT", "profit": "2.20"},
-            {"type": "BUY", "symbol": "KSM-USDT", "profit": "0"},
-            {"type": "SELL", "symbol": "ETH-USDT", "profit": "5.00"},
-        ]
-        mock_bot.statistics._load_trades_from_file = MagicMock()
 
         def run_in_thread(fn, *args):
             return fn(*args)
@@ -607,13 +599,12 @@ class TestHandleBalance:
                     with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
                         await mgr.handle_balance(query, 111)
 
-        mock_bot.statistics._load_trades_from_file.assert_called_once()
         msg = safe_edit.call_args[0][1]
-        # Сумма profit только по SELL по KSM-USDT: 1.50 + 2.20 = 3.70 (ETH не считаем)
-        assert "Profit Bank: `3.70" in msg
+        assert "Profit Bank: `18.38" in msg
+        assert "для пирамидинга" in msg
 
-    async def test_balance_profit_bank_fallback_to_state_when_no_sell_trades(self):
-        """Если по текущей паре нет SELL-сделок, Profit Bank берётся из state."""
+    async def test_balance_profit_bank_shows_state_value(self):
+        """Profit Bank отображает bot.profit_bank из state."""
         mgr = TelegramBotManager()
         query = AsyncMock()
 
@@ -629,9 +620,6 @@ class TestHandleBalance:
         mock_bot.get_total_equity = AsyncMock(return_value=Decimal("600"))
         mock_bot.ex = MagicMock()
         mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("100"), Decimal("62.5")])
-        mock_bot.statistics = MagicMock()
-        mock_bot.statistics.trades = []  # нет сделок по паре
-        mock_bot.statistics._load_trades_from_file = MagicMock()
 
         def run_in_thread(fn, *args):
             return fn(*args)
@@ -644,3 +632,4 @@ class TestHandleBalance:
 
         msg = safe_edit.call_args[0][1]
         assert "Profit Bank: `12.34" in msg
+        assert "для пирамидинга" in msg

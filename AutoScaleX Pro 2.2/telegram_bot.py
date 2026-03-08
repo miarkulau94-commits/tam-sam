@@ -833,13 +833,7 @@ class TelegramBotManager:
                 profit = Decimal("0")
                 roi = Decimal("0")
 
-            # Profit Bank показываем по сумме прибыли из сделок по текущей паре (чтобы сходилось с «Исполнено SELL»)
-            await asyncio.to_thread(bot.statistics._load_trades_from_file)
-            trades = getattr(bot.statistics, "trades", []) or []
-            sell_trades_this_symbol = [t for t in trades if t.get("type") == "SELL" and t.get("symbol") == bot.symbol]
-            profit_bank_from_trades = sum(Decimal(str(t.get("profit", 0))) for t in sell_trades_this_symbol)
-            display_profit_bank = profit_bank_from_trades if sell_trades_this_symbol else bot.profit_bank
-
+            # Profit Bank — то же значение из state, от которого срабатывает пирамидинг (check_pyramiding)
             message = (
                 f"💰 **Баланс**\n\n"
                 f"{bot.quote_asset_name}: `{quote_balance:.2f}`\n"
@@ -847,7 +841,7 @@ class TelegramBotManager:
                 f"💵 Итого: `{total_equity:.2f} {bot.quote_asset_name}`\n"
                 f"📈 Прибыль: `{profit:.2f} {bot.quote_asset_name}` ({roi:.2f}%)\n"
                 f"📊 Цена {bot.base_asset_name}: `{price:.2f} {bot.quote_asset_name}`\n"
-                f"💎 Profit Bank: `{display_profit_bank:.2f} {bot.quote_asset_name}`\n"
+                f"💎 Profit Bank: `{bot.profit_bank:.2f} {bot.quote_asset_name}` (для пирамидинга)\n"
                 f"📌 Пара: `{bot.symbol}`"
             )
 

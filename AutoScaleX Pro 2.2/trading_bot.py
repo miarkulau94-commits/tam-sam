@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import time
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import IntEnum
 from statistics import Statistics
 from typing import List
@@ -1163,8 +1163,11 @@ class TradingBot:
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
 
-            # Рассчитываем количество и цену
-            new_buy_price = (new_buy_price // tick) * tick
+            # Рассчитываем количество и цену (округление цены до ближайшего тика, чтобы шаг был ближе к grid_step_pct)
+            if tick > 0:
+                new_buy_price = (new_buy_price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+            else:
+                new_buy_price = (new_buy_price // tick) * tick
             qty = (self.buy_order_value / new_buy_price).quantize(step, rounding=ROUND_DOWN)
             buy_notional = qty * new_buy_price
             required_notional = self.get_required_notional(min_notional)

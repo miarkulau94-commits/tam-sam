@@ -518,6 +518,49 @@ class TestTradingCycleIntegration:
             assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 61
 
     @pytest.mark.asyncio
+    async def test_create_buy_after_sell_price_rounds_to_nearest_tick_not_floor(self, temp_dirs, mock_exchange):
+        """При шаге 1.5% и sell_price=1.46 цена BUY округляется до ближайшего тика (1.44), а не вниз (1.43)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_nearest_tick")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.return_value = Decimal("1000")
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_buy_tick"})
+        mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
+            bot.grid_step_pct = Decimal("0.015")  # 1.5%
+            bot.buy_order_value = Decimal("10")
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("1.3") - Decimal(i) * Decimal("0.01"), Decimal("7"), status="open")
+                for i in range(60)
+            ] + [
+                Order(f"sell_{j}", "SELL", Decimal("1.5") + Decimal(j) * Decimal("0.02"), Decimal("7"), status="open")
+                for j in range(4)
+            ]
+            # 1.46 * (1 - 0.015) = 1.4381 -> nearest tick 0.01 = 1.44 (не 1.43)
+            result = await bot.create_buy_after_sell(Decimal("1.46"))
+            assert result is True
+            mock_exchange.place_limit.assert_called_once()
+            placed_price = mock_exchange.place_limit.call_args[0][3]
+            assert placed_price == Decimal("1.44"), "BUY price must round to nearest tick (1.44), not floor (1.43)"
+
+    @pytest.mark.asyncio
     async def test_create_buy_after_sell_allows_62_63_64_by_open_sell_count(self, temp_dirs, mock_exchange):
         """Лимит после SELL: 62 при 3 open SELL, 63 при 2, 64 при 1 — новый BUY выставляется."""
         state_dir, user_data_dir = temp_dirs

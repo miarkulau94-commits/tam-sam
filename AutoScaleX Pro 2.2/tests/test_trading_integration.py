@@ -1133,13 +1133,14 @@ class TestTradingCycleIntegrationContinued:
                 bot.orders.append(Order(f"oth_{i}", "SELL", Decimal("101") + Decimal(i), Decimal("0.1"), status="open"))
             create_at_bottom = AsyncMock(return_value=5)
             get_price = AsyncMock(return_value=Decimal("100"))
-            with patch.object(bot, "create_buy_orders_at_bottom", create_at_bottom), patch.object(
-                bot, "get_current_price", get_price
+            with (
+                patch("grid_protection.create_buy_orders_at_bottom", create_at_bottom),
+                patch.object(bot, "get_current_price", get_price),
             ):
                 n = await bot.check_protection_add_five_buy_when_three_left()
             assert n == 5
             create_at_bottom.assert_called_once()
-            call_price = create_at_bottom.call_args[0][0]
+            call_price = create_at_bottom.call_args[0][1]  # (bot, current_price) -> index 1 is price
             assert call_price == Decimal("100")
 
     @pytest.mark.asyncio
@@ -1294,9 +1295,278 @@ class TestTradingCycleIntegrationContinued:
                 bot.orders.append(Order(f"s_{i}", "SELL", Decimal("101") + Decimal(i), Decimal("0.1"), status="open"))
             create_at_bottom = AsyncMock(return_value=0)
             get_price = AsyncMock(return_value=Decimal("100"))
-            with patch.object(bot, "create_buy_orders_at_bottom", create_at_bottom), patch.object(
-                bot, "get_current_price", get_price
+            with (
+                patch("grid_protection.create_buy_orders_at_bottom", create_at_bottom),
+                patch.object(bot, "get_current_price", get_price),
             ):
                 n = await bot.check_protection_add_five_buy_when_three_left()
             assert n == 0
             create_at_bottom.assert_called_once()
+
+
+class TestProtectionBoundaries:
+    """Граничные значения порогов защиты: 62 (1.5%), 127 (0.75%)."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.fixture
+    def mock_exchange(self):
+        ex = MagicMock()
+        ex.balance.return_value = Decimal("1000")
+        ex.available_balance.return_value = Decimal("1000")
+        ex.open_orders.return_value = []
+        ex.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_protection_above_threshold_63_runs(self, temp_dirs, mock_exchange):
+        """При шаге 1.5% и total_open == 63 (> 62) защита срабатывает и вызывается create_buy_orders_at_bottom."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_bound_63")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "x"})
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            # 3 BUY + 60 других = 63 (> 62)
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i), Decimal("0.1"), status="open")
+                for i in range(3)
+            ]
+            for i in range(60):
+                bot.orders.append(Order(f"o_{i}", "SELL", Decimal("101") + Decimal(i), Decimal("0.1"), status="open"))
+            create_at_bottom = AsyncMock(return_value=2)
+            get_price = AsyncMock(return_value=Decimal("100"))
+            with (
+                patch("grid_protection.create_buy_orders_at_bottom", create_at_bottom),
+                patch.object(bot, "get_current_price", get_price),
+            ):
+                n = await bot.check_protection_add_five_buy_when_three_left()
+            assert n == 2
+            create_at_bottom.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_protection_below_threshold_61_skips(self, temp_dirs, mock_exchange):
+        """При шаге 1.5% и total_open == 61 (< 62) защита не срабатывает."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_bound_61")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            # 3 BUY + 58 других = 61
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i), Decimal("0.1"), status="open")
+                for i in range(3)
+            ]
+            for i in range(58):
+                bot.orders.append(Order(f"o_{i}", "SELL", Decimal("101") + Decimal(i), Decimal("0.1"), status="open"))
+            create_at_bottom = AsyncMock(return_value=5)
+            get_price = AsyncMock(return_value=Decimal("100"))
+            with (
+                patch("grid_protection.create_buy_orders_at_bottom", create_at_bottom),
+                patch.object(bot, "get_current_price", get_price),
+            ):
+                n = await bot.check_protection_add_five_buy_when_three_left()
+            assert n == 0
+            create_at_bottom.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_protection_above_threshold_128_runs(self, temp_dirs, mock_exchange):
+        """При шаге 0.75% и total_open == 128 (> 127) защита срабатывает."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_bound_128")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "y"})
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.grid_step_pct = Decimal("0.0075")
+            # 3 BUY + 125 других = 128 (> 127)
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i), Decimal("0.1"), status="open")
+                for i in range(3)
+            ]
+            for i in range(125):
+                bot.orders.append(Order(f"o_{i}", "SELL", Decimal("101") + Decimal(i), Decimal("0.1"), status="open"))
+            create_at_bottom = AsyncMock(return_value=3)
+            get_price = AsyncMock(return_value=Decimal("100"))
+            with (
+                patch("grid_protection.create_buy_orders_at_bottom", create_at_bottom),
+                patch.object(bot, "get_current_price", get_price),
+            ):
+                n = await bot.check_protection_add_five_buy_when_three_left()
+            assert n == 3
+            create_at_bottom.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_protection_below_threshold_126_skips(self, temp_dirs, mock_exchange):
+        """При шаге 0.75% и total_open == 126 (< 127) защита не срабатывает."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_bound_126")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.grid_step_pct = Decimal("0.0075")
+            # 3 BUY + 123 других = 126
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i), Decimal("0.1"), status="open")
+                for i in range(3)
+            ]
+            for i in range(123):
+                bot.orders.append(Order(f"o_{i}", "SELL", Decimal("101") + Decimal(i), Decimal("0.1"), status="open"))
+            create_at_bottom = AsyncMock(return_value=5)
+            get_price = AsyncMock(return_value=Decimal("100"))
+            with (
+                patch("grid_protection.create_buy_orders_at_bottom", create_at_bottom),
+                patch.object(bot, "get_current_price", get_price),
+            ):
+                n = await bot.check_protection_add_five_buy_when_three_left()
+            assert n == 0
+            create_at_bottom.assert_not_called()
+
+
+class TestFullCycleIntegration:
+    """Интеграционные тесты полного цикла: SELL fill → отмена 5 BUY → флаг → save/load → ребаланс."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.fixture
+    def mock_exchange(self):
+        ex = MagicMock()
+        ex.balance.return_value = Decimal("1000")
+        ex.available_balance.return_value = Decimal("1000")
+        ex.open_orders.return_value = []
+        ex.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        ex._request = AsyncMock(return_value={})
+        ex.invalidate_balance_cache = AsyncMock()
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_sell_fill_sets_flag_then_load_restores_it(self, temp_dirs, mock_exchange):
+        """Полный цикл: 1 SELL исполнен → отмена 5 BUY, флаг сохранён → после load_state флаг восстанавливается."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_full_cycle")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_sell"})
+        mock_exchange.open_orders.return_value = [
+            {"orderId": "buy_0", "side": "BUY", "price": "100", "origQty": "0.1", "executedQty": "0", "status": "NEW"},
+            {"orderId": "sell_1", "side": "SELL", "price": "101", "origQty": "0.1", "executedQty": "0", "status": "NEW"},
+        ]
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.state = BotState.TRADING
+            bot.grid_step_pct = Decimal("0.015")
+            bot.buy_order_value = Decimal("50")
+            bot.orders = [
+                Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i), Decimal("0.1"), status="open")
+                for i in range(6)
+            ]
+            sell_to_fill = Order("sell_0", "SELL", Decimal("101"), Decimal("0.1"), status="open")
+            bot.orders.append(sell_to_fill)
+            bot.orders.append(Order("sell_1", "SELL", Decimal("102"), Decimal("0.1"), status="open"))
+            bot.position_manager.add_position(Decimal("100"), Decimal("0.1"))
+
+            from handlers import handle_sell_filled
+
+            await handle_sell_filled(bot, sell_to_fill, Decimal("101"))
+
+            assert getattr(bot, "_cancelled_buy_for_rebalance_prep", False) is True
+
+            bot2 = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot2.load_state()
+            assert getattr(bot2, "_cancelled_buy_for_rebalance_prep", False) is True
+
+    @pytest.mark.asyncio
+    async def test_rebalancing_flow_market_buy_and_apply_called(self, temp_dirs, mock_exchange):
+        """При 0 SELL check_rebalancing выполняет market buy и apply (моки). bot.ex подменён на мок напрямую."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_rebal_flow")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.open_orders = AsyncMock(return_value=[])
+        mock_exchange.available_balance = AsyncMock(return_value=Decimal("500"))
+        mock_exchange.balance = AsyncMock(return_value=Decimal("500"))
+        mock_exchange.invalidate_balance_cache = AsyncMock()
+        mock_exchange.place_market = AsyncMock(return_value={"orderId": "mb_1"})
+        mock_exchange.get_order = AsyncMock(
+            return_value={"orderId": "mb_1", "price": "100", "executedQty": "10", "status": "FILLED"}
+        )
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(999, "k", "s", symbol="ETH-USDT")
+            bot.ex = mock_exchange
+            bot.state = BotState.TRADING
+            bot.orders = []
+            bot.rebuild_buy_grid_from_price = AsyncMock()
+            bot.create_sell_grid_only = AsyncMock(return_value=3)
+            with patch("rebalance.create_buy_orders_at_bottom", AsyncMock(return_value=2)):
+                await bot.check_rebalancing(Decimal("100"))
+            mock_exchange.place_market.assert_called_once()
+            bot.rebuild_buy_grid_from_price.assert_called_once()
+            bot.create_sell_grid_only.assert_called_once()

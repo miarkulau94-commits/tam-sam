@@ -10,6 +10,8 @@ import sys
 from datetime import datetime
 
 import config
+from exchange import get_api_metrics_last_minute
+from structured_logging import StructuredContextFilter
 from telegram_bot import TelegramBotManager
 
 try:
@@ -25,12 +27,16 @@ from logging.handlers import RotatingFileHandler
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - [user_id=%(user_id)s] [symbol=%(symbol)s] [order_id=%(order_id)s] - %(message)s",
     handlers=[
         RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
+# Добавляем фильтр, который подставляет user_id/symbol/order_id из контекста (contextvars)
+_struct_filter = StructuredContextFilter()
+for _h in logging.root.handlers:
+    _h.addFilter(_struct_filter)
 
 log = logging.getLogger("main")
 
@@ -64,6 +70,31 @@ class BotRunner:
                 # Авто-восстановление ботов, которые были запущены до перезапуска/падения интернета
                 await self.telegram_bot.restore_running_bots()
 
+                # Фоновая задача: раз в N мин логировать метрики API и при росте ошибок — алерт админу
+                async def api_metrics_loop():
+                    interval = getattr(config, "API_METRICS_LOG_INTERVAL_SEC", 120)
+                    threshold = getattr(config, "API_METRICS_ERROR_ALERT_THRESHOLD", 10)
+                    while True:
+                        try:
+                            await asyncio.sleep(interval)
+                            m = get_api_metrics_last_minute()
+                            req, err = m.get("requests", 0), m.get("errors", 0)
+                            log.info("[API_METRICS] last 60s: requests=%s, errors=%s", req, err)
+                            if err >= threshold and config.TG_ADMIN_ID and app.bot:
+                                try:
+                                    await app.bot.send_message(
+                                        config.TG_ADMIN_ID,
+                                        f"⚠️ API BingX: за последние 60 с — запросов {req}, ошибок {err}. Проверьте логи.",
+                                    )
+                                except Exception:
+                                    pass
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as e:
+                            log.debug("api_metrics_loop: %s", e)
+
+                metrics_task = asyncio.create_task(api_metrics_loop())
+
                 # Ожидаем завершения
                 stop_event = asyncio.Event()
                 try:
@@ -71,6 +102,11 @@ class BotRunner:
                 except asyncio.CancelledError:
                     pass
 
+                metrics_task.cancel()
+                try:
+                    await metrics_task
+                except asyncio.CancelledError:
+                    pass
                 await app.updater.stop()
                 await app.stop()
         except InvalidToken:

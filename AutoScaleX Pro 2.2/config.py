@@ -80,3 +80,14 @@ ERROR_NOTIFY_COOLDOWN = int(os.getenv("ERROR_NOTIFY_COOLDOWN", "1800"))
 
 # Максимум одновременных перестроек SELL-сетки (остальные ждут в очереди)
 REBALANCING_SEMAPHORE_LIMIT = int(os.getenv("REBALANCING_SEMAPHORE_LIMIT", "15"))
+
+# --- Мониторинг API (логирование метрик, алерт админу) ---
+API_METRICS_LOG_INTERVAL_SEC = int(os.getenv("API_METRICS_LOG_INTERVAL_SEC", "120"))  # раз в 2 мин
+API_METRICS_ERROR_ALERT_THRESHOLD = int(os.getenv("API_METRICS_ERROR_ALERT_THRESHOLD", "10"))  # алерт в TG при ошибках >= N за 60 с
+
+# --- Константы сценариев (защита сетки, подготовка к ребалансу) ---
+# При 1 оставшемся SELL отменяем столько самых низких BUY, чтобы освободить USDT под рыночную покупку
+REBALANCE_PREP_CANCEL_BUY_COUNT = 5
+# Порог открытых ордеров для защиты «3 BUY → добавить до 5 BUY внизу»: только при «большой» сетке
+PROTECTION_THRESHOLD_1_5_PCT = 62   # шаг сетки 1.5%
+PROTECTION_THRESHOLD_0_75_PCT = 127  # шаг сетки 0.75%

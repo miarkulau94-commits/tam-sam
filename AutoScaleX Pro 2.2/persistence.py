@@ -8,7 +8,7 @@ import logging
 import os
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import config
 from cryptography.fernet import Fernet
@@ -31,7 +31,7 @@ class StatePersistence:
         """Получить путь к файлу состояния пользователя"""
         return os.path.join(self.state_dir, f"user_{user_id}.json")
 
-    def save_state(self, user_id: int, state: Dict):
+    def save_state(self, user_id: int, state: Dict[str, Any]) -> None:
         """Сохранить состояние пользователя"""
         try:
             file_path = self._get_user_file(user_id)
@@ -42,7 +42,7 @@ class StatePersistence:
         except (OSError, TypeError, ValueError) as e:
             log.error(f"Error saving state for user {user_id}: {e}")
 
-    def load_state(self, user_id: int) -> Optional[Dict]:
+    def load_state(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Загрузить состояние пользователя"""
         try:
             file_path = self._get_user_file(user_id)

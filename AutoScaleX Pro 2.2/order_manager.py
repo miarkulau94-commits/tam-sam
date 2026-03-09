@@ -4,7 +4,7 @@
 import logging
 import time
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import config
 
@@ -21,8 +21,8 @@ class Order:
         price: Decimal,
         qty: Decimal,
         status: str = "open",
-        amount_usdt: Decimal = None,
-    ):
+        amount_usdt: Optional[Decimal] = None,
+    ) -> None:
         self.order_id = order_id
         self.side = side.upper()
         self.price = price
@@ -34,7 +34,7 @@ class Order:
         )
         self.created_at = time.time()
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> Dict[str, str]:
         """Преобразовать в словарь для сохранения."""
         return {
             "order_id": self.order_id,

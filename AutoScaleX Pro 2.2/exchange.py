@@ -19,7 +19,7 @@ import requests
 import threading
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("exchange")
 error_log = logging.getLogger("api_errors")
@@ -245,7 +245,7 @@ class BingXSpot:
         ).hexdigest()
         return payload
 
-    def _request(self, method, endpoint, params=None):
+    def _request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
         """Выполнить запрос с circuit breaker, глобальным 40 RPS лимитом и ретраями (429/5xx/timeout)."""
         
         def _make_request():
@@ -407,7 +407,7 @@ class BingXSpot:
                         pass
             raise
 
-    def symbol_info(self, symbol: str):
+    def symbol_info(self, symbol: str) -> Dict[str, Any]:
         """Получить информацию о символе"""
         if symbol not in self._symbol_info:
             raw = self._request("GET", "/openApi/spot/v1/common/symbols")
@@ -534,7 +534,7 @@ class BingXSpot:
                 if key in self._cache:
                     del self._cache[key]
 
-    def open_orders(self, symbol: str):
+    def open_orders(self, symbol: str) -> List[Dict[str, Any]]:
         """Получить список открытых ордеров"""
         data = self._request("GET", "/openApi/spot/v1/trade/openOrders", {"symbol": symbol})
         if data is None:
@@ -542,7 +542,7 @@ class BingXSpot:
             return []
         return data.get("orders", [])
 
-    def cancel_order(self, symbol: str, order_id: str):
+    def cancel_order(self, symbol: str, order_id: str) -> Optional[Dict]:
         """Отменить конкретный ордер по ID"""
         try:
             return self._request("GET", "/openApi/spot/v1/trade/cancel", {
@@ -652,7 +652,7 @@ class BingXSpot:
             log.error(f"Error validating order: {e}")
         return result
     
-    def place_limit(self, symbol: str, side: str, qty: Decimal, price: Decimal, delay: float = 0.2, validate: bool = True):
+    def place_limit(self, symbol: str, side: str, qty: Decimal, price: Decimal, delay: float = 0.2, validate: bool = True) -> Optional[Dict]:
         """Разместить лимитный ордер"""
         if validate:
             validation = self.validate_order(symbol, side, qty, price, "LIMIT")
@@ -709,7 +709,7 @@ class BingXSpot:
             time.sleep(delay)
         return res
 
-    def place_market(self, symbol: str, side: str, qty: Decimal, quote_order_qty: Decimal = None):
+    def place_market(self, symbol: str, side: str, qty: Decimal, quote_order_qty: Optional[Decimal] = None) -> Optional[Dict]:
         """Разместить рыночный ордер"""
         side = side.upper()
         type_ = "MARKET"
@@ -729,7 +729,7 @@ class BingXSpot:
 
         return self._request("POST", "/openApi/spot/v1/trade/order", payload)
     
-    def get_order(self, symbol: str, order_id: str):
+    def get_order(self, symbol: str, order_id: str) -> Optional[Dict]:
         """Получить информацию об ордере"""
         return self._request("GET", "/openApi/spot/v1/trade/query", {
             "symbol": symbol,

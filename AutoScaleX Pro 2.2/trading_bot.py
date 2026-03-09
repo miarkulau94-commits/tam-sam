@@ -9,13 +9,24 @@ import time
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import IntEnum
 from statistics import Statistics
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import config
 from buy_position import PositionManager
 from exchange import BingXSpot, BingXSpotAsync
+from grid_protection import (
+    cancel_last_n_buy_orders as gp_cancel_last_n_buy_orders,
+    check_protection_add_five_buy_when_three_left as gp_check_protection,
+    create_buy_orders_at_bottom as gp_create_buy_orders_at_bottom,
+)
+from handlers import handle_buy_filled as handle_buy_filled_impl, handle_sell_filled as handle_sell_filled_impl
 from order_manager import Order, deduplicate_orders
+from rebalance import (
+    check_rebalancing as rb_check_rebalancing,
+    check_rebalancing_after_all_buy_filled as rb_check_rebalancing_after_all_buy_filled,
+)
 from persistence import StatePersistence
+from structured_logging import set_log_context
 
 log = logging.getLogger("trading_bot")
 __all__ = ["Order", "TradingBot", "BotState"]
@@ -35,7 +46,7 @@ class BotState(IntEnum):
 class TradingBot:
     """Основной класс торгового бота"""
 
-    def __init__(self, user_id: int, api_key: str, secret: str, telegram_notifier=None, symbol: str = None):
+    def __init__(self, user_id: int, api_key: str, secret: str, telegram_notifier: Any = None, symbol: Optional[str] = None) -> None:
         self.user_id = user_id
         self.telegram_notifier = telegram_notifier  # Сохраняем для использования в main_loop
         sync_ex = BingXSpot(api_key, secret, telegram_notifier)
@@ -92,7 +103,7 @@ class TradingBot:
         # Загружаем сохраненное состояние
         self.load_state()
 
-    def load_state(self):
+    def load_state(self) -> None:
         """Загрузить сохраненное состояние"""
         try:
             state = self.persistence.load_state(self.user_id)
@@ -228,7 +239,7 @@ class TradingBot:
                 json_path = os.path.join(trades_dir, f"statistics_{self.user_id}.json")
                 self.statistics = Statistics(csv_file=csv_path, json_file=json_path, uid=self.uid, persistence=self.persistence)
 
-    def save_state(self):
+    def save_state(self) -> None:
         """Сохранить текущее состояние"""
         try:
             # Проверяем grid_step_pct перед сохранением
@@ -336,14 +347,14 @@ class TradingBot:
             return 127
         step_pct = float(self.grid_step_pct)
         if abs(step_pct - 0.0075) < 0.0001:
-            return 127
+            return config.PROTECTION_THRESHOLD_0_75_PCT
         if abs(step_pct - 0.015) < 0.0001:
-            return 62
+            return config.PROTECTION_THRESHOLD_1_5_PCT
         if step_pct <= 0.0075:
-            return 127
+            return config.PROTECTION_THRESHOLD_0_75_PCT
         if step_pct >= 0.015:
-            return 62
-        return int(127 - (step_pct - 0.0075) / 0.0075 * 65)  # интерполяция 127..62
+            return config.PROTECTION_THRESHOLD_1_5_PCT
+        return int(config.PROTECTION_THRESHOLD_0_75_PCT - (step_pct - 0.0075) / 0.0075 * (config.PROTECTION_THRESHOLD_0_75_PCT - config.PROTECTION_THRESHOLD_1_5_PCT))
 
     async def calculate_active_buy_orders_count(self) -> int:
         """Рассчитать количество активных BUY ордеров
@@ -709,245 +720,13 @@ class TradingBot:
 
         return result
 
-    async def handle_buy_filled(self, order: Order, price: Decimal):
-        """Обработка исполнения BUY ордера"""
-        try:
-            if self.state == BotState.STOPPED:
-                return
-            log.info(f"🟩 Processing BUY order fill: orderId={order.order_id}, price={price:.8f}, qty={order.qty:.8f}")
+    async def handle_buy_filled(self, order: Order, price: Decimal) -> None:
+        """Обработка исполнения BUY ордера (реализация в handlers.py)."""
+        await handle_buy_filled_impl(self, order, price)
 
-            self.base_asset = await self.ex.balance(self.base_asset_name)
-            self.current_deposit = await self.ex.balance(self.quote_asset_name)
-
-            # Получаем реальное количество после исполнения (с учетом комиссии)
-            btc_received = order.qty * (Decimal("1") - config.FEE_RATE)
-            self.total_executed_buys += 1
-
-            log.info(
-                f"🟩 BUY executed: received={btc_received:.8f} {self.base_asset_name}, balance={self.base_asset:.8f}, deposit={self.current_deposit:.2f} {self.quote_asset_name}"
-            )
-
-            self.position_manager.add_position(price, btc_received)
-            order.status = "filled"
-            order.executed_qty = order.qty
-
-            self.statistics.save_trade(
-                {
-                    "type": "BUY",
-                    "symbol": self.symbol,
-                    "price": price,
-                    "qty": btc_received,
-                    "amount_usdt": order.amount_usdt if order.amount_usdt > 0 else (order.qty * price),
-                    "profit": Decimal("0"),
-                    "profit_bank": self.profit_bank,
-                    "total_equity": await self.get_total_equity(price),
-                }
-            )
-
-            # После BUY создаем один SELL ордер на сумму покупки плюс шаг сетки
-            # Используем реальное количество базового актива с биржи
-            # Создаем SELL ордер после BUY
-            log.info(f"[BUY FILL] Step 1: Attempting to create SELL order after BUY fill at price {price:.8f}")
-            try:
-                info = await self.ex.symbol_info(self.symbol)
-                step = info["stepSize"]
-                tick = info["tickSize"]
-                min_qty = info.get("minQty", Decimal("0.000001"))
-                min_notional = info.get("minNotional", Decimal("0"))
-
-                # Цена SELL = цена покупки + шаг сетки (округление до ближайшего тика, как и для BUY после SELL)
-                sell_price = price * (Decimal("1") + self.grid_step_pct)
-                if tick > 0:
-                    sell_price = (sell_price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
-                else:
-                    sell_price = (sell_price // tick) * tick
-                log.info(f"[CREATE_SELL_AFTER_BUY] Calculated SELL price: {price:.8f} * (1 + {self.grid_step_pct:.6f}) = {sell_price:.8f}")
-
-                # Доступный объём для SELL — реальный free с биржи (избегаем занижения из-за расхождения памяти и биржи)
-                current_base_balance = await self.ex.balance(self.base_asset_name)
-                available_base_asset = await self.ex.available_balance(self.base_asset_name)
-
-                log.info(
-                    f"[CREATE_SELL_AFTER_BUY] Balance check: total={current_base_balance:.8f}, available(free)={available_base_asset:.8f}, btc_received={btc_received:.8f}"
-                )
-
-                # Используем количество из исполненного BUY ордера (реальное количество после комиссии)
-                # Но не больше доступного баланса по бирже
-                sell_qty = min(btc_received, available_base_asset)
-                sell_qty = (sell_qty // step) * step  # Округляем до шага
-
-                log.info(
-                    f"[CREATE_SELL_AFTER_BUY] Qty calculation: btc_received={btc_received:.8f}, available={available_base_asset:.8f}, sell_qty={sell_qty:.8f}"
-                )
-
-                # Проверяем, нет ли уже ордера на этой цене
-                existing_sell = any(o.side == "SELL" and abs(o.price - sell_price) < tick and o.status == "open" for o in self.orders)
-
-                # При пирамидировании: BUY исполнился → нужно выставить SELL выше. Лимит SELL_ORDERS_COUNT
-                # задаёт только начальную сетку; при добавлении позиции SELL-ов может быть больше 5.
-                if existing_sell:
-                    log.warning(f"[CREATE_SELL_AFTER_BUY] SKIPPED: SELL order already exists at price {sell_price:.8f}")
-                elif sell_qty < min_qty:
-                    log.warning(
-                        f"[CREATE_SELL_AFTER_BUY] FAILED: SELL order qty too small: {sell_qty:.8f} < {min_qty:.8f} (min_qty), available_base={available_base_asset:.8f}, btc_received={btc_received:.8f}"
-                    )
-                else:
-                    sell_notional = sell_qty * sell_price
-                    required_notional = self.get_required_notional(min_notional)
-                    log.info(
-                        f"[CREATE_SELL_AFTER_BUY] Validation: qty={sell_qty:.8f}, price={sell_price:.8f}, notional={sell_notional:.8f}, required={required_notional:.8f}"
-                    )
-
-                    if sell_notional < required_notional:
-                        log.warning(f"[CREATE_SELL_AFTER_BUY] FAILED: SELL order notional too small: {sell_notional:.8f} < {required_notional:.8f}")
-                    elif available_base_asset < sell_qty:
-                        log.warning(
-                            f"[CREATE_SELL_AFTER_BUY] FAILED: Insufficient base asset: available={available_base_asset:.8f}, needed={sell_qty:.8f}, total_balance={current_base_balance:.8f}"
-                        )
-                    else:
-                        if self.state == BotState.STOPPED:
-                            return
-                        try:
-                            log.info(f"[CREATE_SELL_AFTER_BUY] Placing SELL order: price={sell_price:.8f}, qty={sell_qty:.8f}")
-                            result = await self.ex.place_limit(self.symbol, "SELL", sell_qty, sell_price, delay=0.1)
-                            if result and result.get("orderId"):
-                                sell_order = Order(order_id=str(result.get("orderId", "")), side="SELL", price=sell_price, qty=sell_qty)
-                                self.orders.append(sell_order)
-                                log.info(
-                                    f"🟥 ✅ [CREATE_SELL_AFTER_BUY] SUCCESS: Created SELL order after BUY fill: orderId={result.get('orderId')}, price={sell_price:.8f}, qty={sell_qty:.8f}, amount={sell_notional:.2f} {self.quote_asset_name}"
-                                )
-                            elif result:
-                                log.warning(f"[CREATE_SELL_AFTER_BUY] FAILED: API returned result without orderId: {result}")
-                            else:
-                                log.warning("[CREATE_SELL_AFTER_BUY] FAILED: API returned None or empty result")
-                        except Exception as e:
-                            log.error(f"[CREATE_SELL_AFTER_BUY] EXCEPTION: Failed to place SELL order at {sell_price:.8f}: {e}", exc_info=True)
-            except Exception as e:
-                log.error(f"[CREATE_SELL_AFTER_BUY] EXCEPTION: Failed to create SELL order after BUY fill: {e}", exc_info=True)
-
-            # Синхронизируем ордера с биржей после создания новых ордеров
-            # Добавляем небольшую задержку, чтобы API биржи успел показать только что созданный ордер
-            await asyncio.sleep(1.5)
-            log.info("[BUY FILL] Step 2: Syncing orders from exchange")
-            await self.sync_orders_from_exchange()
-
-            # Проверяем количество открытых ордеров после синхронизации
-            open_sell_after = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
-            open_buy_after = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-            log.info(f"[BUY FILL] After sync: open SELL={len(open_sell_after)}, open BUY={len(open_buy_after)}")
-
-            # Проверяем ребалансировку: если все BUY ордера исполнены, создаем SELL сетку от VWAP
-            log.info("[BUY FILL] Step 3: Checking rebalancing after BUY fill")
-            await self.check_rebalancing_after_all_buy_filled(price)
-
-            # Если ранее отменили 5 BUY для подготовки ребаланса (1 SELL был), но цена пошла вниз
-            # и теперь SELL снова >= 3 — восстанавливаем BUY внизу сетки
-            if len(open_sell_after) >= 3 and getattr(self, "_cancelled_buy_for_rebalance_prep", False):
-                log.info(
-                    f"[BUY FILL] SELL >= 3 ({len(open_sell_after)}), restoring BUY at bottom (price went down after cancel)"
-                )
-                buy_restored = await self.create_buy_orders_at_bottom(price)
-                if buy_restored > 0:
-                    log.info(f"[BUY FILL] Restored {buy_restored} BUY orders at bottom of grid")
-                self._cancelled_buy_for_rebalance_prep = False
-
-            log.info(f"🟩 [BUY FILL] Processing completed for order {order.order_id}")
-
-            await self.check_critical_level(price)
-            if self.profit_bank > 0:
-                await self.check_pyramiding()
-
-            await asyncio.to_thread(self.save_state)
-
-        except Exception as e:
-            log.error(f"Error handling BUY fill: {e}", exc_info=True)
-
-    async def handle_sell_filled(self, order: Order, price: Decimal):
-        """Обработка исполнения SELL ордера"""
-        try:
-            if self.state == BotState.STOPPED:
-                return
-            log.info("🟥 ✅ [SELL FILL] ========================================")
-            log.info(f"🟥 ✅ [SELL FILL] Processing SELL order fill: orderId={order.order_id}, price={price:.8f}, qty={order.qty:.8f}")
-            log.info("🟥 ✅ [SELL FILL] ========================================")
-
-            profit = self.position_manager.calculate_profit_for_sell(order.qty, price, config.FEE_RATE)
-
-            self.base_asset = await self.ex.balance(self.base_asset_name)
-            self.current_deposit = await self.ex.balance(self.quote_asset_name)
-
-            self.profit_bank += profit
-            self.total_executed_sells += 1
-
-            order.status = "filled"
-            order.executed_qty = order.qty
-
-            self.statistics.save_trade(
-                {
-                    "type": "SELL",
-                    "symbol": self.symbol,
-                    "price": price,
-                    "qty": order.qty,
-                    "amount_usdt": order.qty * price,
-                    "profit": profit,
-                    "profit_bank": self.profit_bank,
-                    "total_equity": await self.get_total_equity(price),
-                }
-            )
-
-            log.info(f"🟥 SELL trade saved: profit={profit:.8f}, profit_bank={self.profit_bank:.8f}, total_executed_sells={self.total_executed_sells}")
-
-            # После SELL создаем новый BUY ордер ниже для поддержания сетки
-            # Важно: инвалидируем кеш баланса перед созданием нового BUY ордера,
-            # так как после исполнения SELL баланс USDT должен был пополниться
-            await self.ex.invalidate_balance_cache(self.quote_asset_name)
-            # Небольшая задержка, чтобы биржа успела обновить баланс
-            await asyncio.sleep(0.5)
-
-            log.info(f"[SELL FILL] Step 1: Calling create_buy_after_sell with price {price:.8f}")
-            buy_created = await self.create_buy_after_sell(price)
-            log.info(f"[SELL FILL] Step 1 result: buy_created={buy_created}")
-
-            # Синхронизируем ордера с биржей перед проверкой ребаланса, чтобы check_rebalancing видел только что созданные ордера
-            # Добавляем небольшую задержку, чтобы API биржи успел показать только что созданный ордер
-            await asyncio.sleep(1.5)
-            log.info("[SELL FILL] Step 2: Syncing orders from exchange")
-            await self.sync_orders_from_exchange()
-
-            # Проверяем количество открытых ордеров после синхронизации
-            open_sell_after = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
-            open_buy_after = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-            log.info(f"[SELL FILL] After sync: open SELL={len(open_sell_after)}, open BUY={len(open_buy_after)}")
-
-            # Если остался 1 SELL ордер (предпоследний исполнился), отменяем 5 последних BUY для освобождения USDT
-            if len(open_sell_after) == 1:
-                log.info("[SELL FILL] Only 1 SELL order remaining, cancelling 5 last BUY orders to free USDT for new SELL grid")
-                canceled_count = await self.cancel_last_n_buy_orders(5)
-
-                if canceled_count > 0:
-                    self._cancelled_buy_for_rebalance_prep = True
-                    # Инвалидируем кеш баланса после отмены ордеров
-                    await self.ex.invalidate_balance_cache(self.quote_asset_name)
-                    # Ждем немного, чтобы биржа успела освободить баланс
-                    await asyncio.sleep(1)
-                    # Обновляем баланс
-                    quote_available_after = await self.ex.available_balance(self.quote_asset_name)
-                    log.info(
-                        f"[SELL FILL] After cancelling {canceled_count} BUY orders: available balance = {quote_available_after:.2f} {self.quote_asset_name}"
-                    )
-
-            if self.profit_bank > 0:
-                await self.check_pyramiding()
-
-            # Проверяем ребалансировку
-            log.info("[SELL FILL] Step 3: Checking rebalancing")
-            await self.check_rebalancing(price)
-
-            await asyncio.to_thread(self.save_state)
-            log.info(f"🟥 SELL fill processing completed for order {order.order_id}")
-
-        except Exception as e:
-            log.error(f"Error handling SELL fill: {e}", exc_info=True)
+    async def handle_sell_filled(self, order: Order, price: Decimal) -> None:
+        """Обработка исполнения SELL ордера (реализация в handlers.py)."""
+        await handle_sell_filled_impl(self, order, price)
 
     async def check_critical_level(self, current_price: Decimal):
         """Проверка на критический уровень"""
@@ -1373,221 +1152,13 @@ class TradingBot:
         except Exception as e:
             log.error(f"Error creating SELL after SELL: {e}")
 
-    async def _rebalancing_apply_after_market_buy(self, market_result: dict, current_price: Decimal) -> bool:
-        """После успешного market buy: обновить позицию, перестроить BUY сетку, создать SELL и при необходимости BUY внизу. Возвращает True при успехе."""
-        if not market_result or not market_result.get("orderId"):
-            return False
-        log.info(f"🟩 Market buy successful: orderId={market_result.get('orderId')}")
-        await asyncio.sleep(3)
-        try:
-            order_info = await self.ex.get_order(self.symbol, market_result.get("orderId"))
-            if order_info:
-                executed_price = Decimal(str(order_info.get("price", current_price)))
-                executed_qty = Decimal(str(order_info.get("executedQty", "0")))
-                if executed_qty > 0:
-                    self.position_manager.add_position(executed_price, executed_qty)
-                    log.info(f"Added position from market buy: {executed_qty} {self.base_asset_name} at {executed_price}")
-        except Exception as e:
-            log.warning(f"Failed to get order info after market buy: {type(e).__name__}")
+    async def check_rebalancing(self, current_price: Decimal) -> None:
+        """Проверка на ребаланс — все SELL закрыты (реализация в rebalance.py)."""
+        await rb_check_rebalancing(self, current_price)
 
-        await self.ex.invalidate_balance_cache(self.base_asset_name)
-        await self.ex.invalidate_balance_cache(self.quote_asset_name)
-        await asyncio.sleep(0.5)
-        self.base_asset = await self.ex.balance(self.base_asset_name)
-        self.current_deposit = await self.ex.balance(self.quote_asset_name)
-
-        try:
-            new_current_price = await self.get_current_price()
-            log.info(f"[REBALANCING] Got current price: {new_current_price:.8f}")
-        except Exception as e:
-            log.error(f"[REBALANCING] Failed to get current price: {type(e).__name__}")
-            new_current_price = current_price
-
-        log.info(f"[REBALANCING] Rebuilding BUY grid from new price: {new_current_price:.8f}")
-        try:
-            await self.rebuild_buy_grid_from_price(new_current_price)
-            log.info("🟩 [REBALANCING] ✅ BUY grid rebuilt successfully")
-        except Exception as e:
-            log.error(f"[REBALANCING] Failed to rebuild BUY grid: {type(e).__name__}", exc_info=True)
-            log.warning("[REBALANCING] Continuing with SELL grid creation despite BUY grid rebuild issues")
-
-        try:
-            sell_created_count = await self.create_sell_grid_only(new_current_price)
-            log.info(f"🟥 [REBALANCING] ✅ SELL grid created: {sell_created_count} orders")
-        except Exception as e:
-            log.error(f"[REBALANCING] Failed to create SELL grid: {type(e).__name__}", exc_info=True)
-            sell_created_count = 0
-
-        if sell_created_count and sell_created_count >= 3:
-            log.info(f"[REBALANCING] Creating BUY orders at bottom (sell_created_count={sell_created_count})")
-            buy_created_count = await self.create_buy_orders_at_bottom(new_current_price)
-            log.info(f"🟩 [REBALANCING] Created {buy_created_count} BUY orders at bottom")
-        else:
-            log.info(f"[REBALANCING] Skipping BUY at bottom: sell_created_count={sell_created_count} (need >=3)")
-
-        self._cancelled_buy_for_rebalance_prep = False
-        await asyncio.to_thread(self.save_state)
-        log.info("[REBALANCING] ✅ Rebalancing completed successfully")
-        return True
-
-    async def check_rebalancing(self, current_price: Decimal):
-        """Проверка на ребаланс (все SELL ордера закрыты) - покупаем по рынку, перестраиваем BUY сетку и создаем новые SELL ордера
-        BUY ордера подтягиваются к текущей цене (если цена растет, сетка движется вверх)
-        """
-        try:
-            if self.state == BotState.STOPPED:
-                return
-            open_sell_orders = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
-            open_buy_orders = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-
-            log.info(f"[REBALANCING_CHECK] Memory: open SELL={len(open_sell_orders)}, open BUY={len(open_buy_orders)}, state={self.state}")
-
-            # Проверяем, что действительно нет SELL ордеров на бирже (не только в памяти)
-            try:
-                exchange_orders = await self.ex.open_orders(self.symbol)
-                exchange_sell_orders = [o for o in exchange_orders if o.get("side") == "SELL"]
-                log.info(f"[REBALANCING_CHECK] Exchange: open SELL={len(exchange_sell_orders)}")
-            except Exception as e:
-                log.error(f"[REBALANCING_CHECK] Failed to get exchange orders: {e}", exc_info=True)
-                exchange_sell_orders = []
-
-            if len(open_sell_orders) == 0 and len(exchange_sell_orders) == 0 and self.state == BotState.TRADING:
-                log.info("[REBALANCING_CHECK] ✅ Condition met: All SELL orders executed, starting rebalancing")
-                log.info(
-                    f"Rebalancing: All SELL orders executed (checked both memory and exchange). Rebuilding BUY grid from current price: {current_price:.8f} ({len(open_buy_orders)} old BUY orders will be cancelled)"
-                )
-
-                # Инвалидируем кеш баланса перед проверкой, чтобы получить актуальный баланс после возможной отмены BUY ордеров
-                await self.ex.invalidate_balance_cache(self.quote_asset_name)
-                await asyncio.sleep(0.5)  # Небольшая задержка для обновления баланса на бирже
-
-                # Все SELL закрыты - покупаем по рынку на фиксированную сумму (5 ордеров × размер ордера + 2 USDT запас)
-                # Например: 5 × 10 USDT + 2 = 52 USDT, 5 × 20 USDT + 2 = 102 USDT
-                market_buy_amount_usdt = (self.buy_order_value * Decimal("5")) + Decimal("2")
-                # Используем available_balance для проверки доступного баланса
-                quote_available = await self.ex.available_balance(self.quote_asset_name)
-                quote_balance = await self.ex.balance(self.quote_asset_name)
-
-                log.info(f"[REBALANCING] Balance check: available={quote_available}, total={quote_balance}, required={market_buy_amount_usdt}")
-
-                if quote_available >= market_buy_amount_usdt:
-                    try:
-                        log.info(
-                            f"All SELL orders executed. Performing market buy for new SELL orders: {market_buy_amount_usdt} {self.quote_asset_name} (5 × {self.buy_order_value} + 2 USDT reserve)"
-                        )
-
-                        # Делаем рыночную покупку на сумму (используя quoteOrderQty)
-                        market_result = await self.ex.place_market(self.symbol, "BUY", qty=Decimal("0"), quote_order_qty=market_buy_amount_usdt)
-
-                        if market_result and market_result.get("orderId"):
-                            await self._rebalancing_apply_after_market_buy(market_result, current_price)
-                        else:
-                            log.warning(f"[REBALANCING] Market buy failed or no orderId in result: {market_result}")
-                    except Exception as e:
-                        error_msg = str(e)
-                        log.error(f"[REBALANCING] Exception during market buy: {error_msg}", exc_info=True)
-                        if "Permission denied" in error_msg or "Spot Trading permission" in error_msg:
-                            raise
-                        # Если недостаточно баланса, пытаемся использовать доступный баланс (минус небольшой запас)
-                        elif "balance not enough" in error_msg.lower() or "insufficient" in error_msg.lower():
-                            log.warning(
-                                f"[REBALANCING] Insufficient balance for market buy: available={quote_available:.2f}, required={market_buy_amount_usdt:.2f}"
-                            )
-                            # Пытаемся использовать доступный баланс (минус 1 USDT запас)
-                            if quote_available > Decimal("1"):
-                                adjusted_amount = quote_available - Decimal("1")
-                                log.info(
-                                    f"[REBALANCING] Retrying with adjusted amount: {adjusted_amount:.2f} {self.quote_asset_name} (available - 1 USDT reserve)"
-                                )
-                                try:
-                                    market_result = await self.ex.place_market(self.symbol, "BUY", qty=Decimal("0"), quote_order_qty=adjusted_amount)
-                                    if market_result and market_result.get("orderId"):
-                                        await self._rebalancing_apply_after_market_buy(market_result, current_price)
-                                    else:
-                                        log.warning(f"[REBALANCING] Market buy with adjusted amount failed: {market_result}")
-                                except Exception as e2:
-                                    log.error(f"[REBALANCING] Failed to retry with adjusted amount: {e2}", exc_info=True)
-                                    log.warning(
-                                        f"[REBALANCING] Cannot create new grid - insufficient balance. Available: {quote_available:.2f}, Required: {market_buy_amount_usdt:.2f}"
-                                    )
-                            else:
-                                log.warning(
-                                    f"[REBALANCING] Cannot create new grid - insufficient balance. Available: {quote_available:.2f}, Required: {market_buy_amount_usdt:.2f}"
-                                )
-                        else:
-                            log.warning(f"[REBALANCING] Failed to perform market buy for rebalancing: {e}")
-                else:
-                    # Недостаточно баланса для полного маркет-бая, но пытаемся использовать доступный баланс
-                    log.warning(
-                        f"[REBALANCING] Insufficient available balance for full market buy: available={quote_available:.2f}, total={quote_balance:.2f}, required={market_buy_amount_usdt:.2f}"
-                    )
-
-                    # Если есть хотя бы минимальный баланс (больше 1 USDT), используем его для создания сетки
-                    if quote_available > Decimal("1"):
-                        adjusted_amount = quote_available - Decimal("1")  # Оставляем 1 USDT резерв
-                        log.info(
-                            f"[REBALANCING] Attempting market buy with available balance: {adjusted_amount:.2f} {self.quote_asset_name} (available - 1 USDT reserve)"
-                        )
-
-                        try:
-                            market_result = await self.ex.place_market(self.symbol, "BUY", qty=Decimal("0"), quote_order_qty=adjusted_amount)
-
-                            if market_result and market_result.get("orderId"):
-                                await self._rebalancing_apply_after_market_buy(market_result, current_price)
-                            else:
-                                log.warning(f"[REBALANCING] Market buy with available balance failed: {market_result}")
-                        except Exception as e2:
-                            error_msg = str(e2)
-                            log.error(f"[REBALANCING] Failed to perform market buy with available balance: {error_msg}", exc_info=True)
-                            if "balance not enough" in error_msg.lower() or "insufficient" in error_msg.lower():
-                                log.warning(
-                                    f"[REBALANCING] Cannot create new grid - insufficient balance even for available amount. Available: {quote_available:.2f}"
-                                )
-                            else:
-                                log.warning(f"[REBALANCING] Market buy failed with error: {error_msg}")
-                    else:
-                        log.warning(
-                            f"[REBALANCING] Cannot create new grid - insufficient balance. Available: {quote_available:.2f} (need > 1 USDT), Required: {market_buy_amount_usdt:.2f}"
-                        )
-            else:
-                log.debug(
-                    f"[REBALANCING_CHECK] Condition not met: open_sell_memory={len(open_sell_orders)}, open_sell_exchange={len(exchange_sell_orders)}, state={self.state}"
-                )
-
-        except Exception as e:
-            log.error(f"[REBALANCING] Error checking rebalancing: {e}", exc_info=True)
-
-    async def check_rebalancing_after_all_buy_filled(self, current_price: Decimal):
-        """Проверка ребалансировки после исполнения всех BUY ордеров
-        Создает SELL сетку из 3 ордеров от средней цены покупки (VWAP)
-        """
-        try:
-            # Проверяем, что действительно нет BUY ордеров на бирже (не только в памяти)
-            exchange_orders = await self.ex.open_orders(self.symbol)
-            exchange_buy_orders = [o for o in exchange_orders if o.get("side") == "BUY"]
-
-            open_buy_orders = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-
-            # Если все BUY ордера исполнены и есть позиции (VWAP > 0), создаем SELL сетку от VWAP
-            if len(open_buy_orders) == 0 and len(exchange_buy_orders) == 0 and self.state == BotState.TRADING:
-                # Рассчитываем VWAP (среднюю цену покупки)
-                vwap = await self.calculate_vwap()
-
-                if vwap > 0:
-                    log.info(f"[REBALANCING_AFTER_BUY] All BUY orders executed. VWAP: {vwap:.8f}. Creating SELL grid from VWAP")
-
-                    # Используем существующую функцию для создания SELL сетки от VWAP
-                    result = await self.create_critical_sell_grid()
-
-                    if result["created_count"] > 0:
-                        log.info(f"🟥 [REBALANCING_AFTER_BUY] ✅ Successfully created {result['created_count']} SELL orders from VWAP {vwap:.8f}")
-                    else:
-                        log.warning(f"[REBALANCING_AFTER_BUY] ⚠️ Failed to create SELL orders from VWAP. Created: {result['created_count']}")
-                else:
-                    log.warning("[REBALANCING_AFTER_BUY] VWAP is 0, cannot create SELL grid from average price")
-
-        except Exception as e:
-            log.error(f"[REBALANCING_AFTER_BUY] Error checking rebalancing after all BUY filled: {e}", exc_info=True)
+    async def check_rebalancing_after_all_buy_filled(self, current_price: Decimal) -> None:
+        """Проверка ребалансировки после исполнения всех BUY (реализация в rebalance.py)."""
+        await rb_check_rebalancing_after_all_buy_filled(self, current_price)
 
     async def rebuild_buy_grid_from_price(self, price: Decimal):
         """Перестроить BUY сетку от текущей цены (подтянуть BUY ордера к цене)
@@ -1858,169 +1429,17 @@ class TradingBot:
             log.error(f"Error creating SELL grid: {e}", exc_info=True)
             return 0
 
-    async def cancel_last_n_buy_orders(self, n: int):
-        """Отменить последние N BUY ордеров (самые низкие по цене) для освобождения USDT"""
-        try:
-            open_buy_orders = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-
-            if len(open_buy_orders) == 0:
-                log.warning("[CANCEL_LAST_BUY] No open BUY orders to cancel")
-                return 0
-
-            # Сортируем по цене (от меньшей к большей) - последние N это самые низкие цены
-            open_buy_orders_sorted = sorted(open_buy_orders, key=lambda x: x.price)
-            orders_to_cancel = open_buy_orders_sorted[:n]  # Берем первые N (самые низкие)
-
-            log.info(
-                f"[CANCEL_LAST_BUY] Cancelling {len(orders_to_cancel)} last BUY orders (lowest prices): {[f'{o.price:.8f}' for o in orders_to_cancel]}"
-            )
-
-            canceled_count = 0
-            for order in orders_to_cancel:
-                try:
-                    await self.ex._request("GET", "/openApi/spot/v1/trade/cancel", {"symbol": self.symbol, "orderId": order.order_id})
-                    if order in self.orders:
-                        self.orders.remove(order)
-                    canceled_count += 1
-                    log.info(f"[CANCEL_LAST_BUY] ✅ Cancelled BUY order {order.order_id} at {order.price:.8f}")
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    log.warning(f"[CANCEL_LAST_BUY] Failed to cancel BUY order {order.order_id}: {e}")
-
-            log.info(f"[CANCEL_LAST_BUY] Successfully cancelled {canceled_count} out of {len(orders_to_cancel)} BUY orders")
-            return canceled_count
-        except Exception as e:
-            log.error(f"[CANCEL_LAST_BUY] Error cancelling last BUY orders: {e}", exc_info=True)
-            return 0
+    async def cancel_last_n_buy_orders(self, n: int) -> int:
+        """Отменить последние N BUY ордеров (реализация в grid_protection.py)."""
+        return await gp_cancel_last_n_buy_orders(self, n)
 
     async def check_protection_add_five_buy_when_three_left(self) -> int:
-        """Защита: при падении цены, если осталось 3 открытых BUY и сетка большая (открытых ордеров > порога),
-        добавить до 5 BUY внизу сетки. Если баланса не хватает — ставить сколько хватает.
-        Порог: при шаге 1.5% — 62, при шаге 0.75% — 127."""
-        try:
-            open_buy = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-            open_buy_count = len(open_buy)
-            if open_buy_count > 3:
-                return 0
-            total_open = len([o for o in self.orders if o.status == "open"])
-            threshold = self.get_min_open_orders_for_protection()
-            if total_open <= threshold:
-                log.debug(
-                    "[PROTECTION_3_BUY] Skip: total_open=%s <= threshold=%s",
-                    total_open,
-                    threshold,
-                )
-                return 0
-            current_price = await self.get_current_price()
-            log.info(
-                "[PROTECTION_3_BUY] open_buy=%s, total_open=%s > threshold=%s -> adding up to 5 BUY at bottom",
-                open_buy_count,
-                total_open,
-                threshold,
-            )
-            return await self.create_buy_orders_at_bottom(current_price)
-        except Exception as e:
-            log.error("[PROTECTION_3_BUY] Error: %s", e, exc_info=True)
-            return 0
+        """Защита: при ≤3 BUY и большой сетке добавить до 5 BUY внизу (реализация в grid_protection.py)."""
+        return await gp_check_protection(self)
 
-    async def create_buy_orders_at_bottom(self, current_price: Decimal):
-        """Создать BUY ордера внизу сетки (ниже всех существующих BUY) на освобожденный баланс"""
-        try:
-            info = await self.ex.symbol_info(self.symbol)
-            step = info.get("stepSize", Decimal("0.000001"))
-            tick = info.get("tickSize", Decimal("0.01"))
-            min_qty = info.get("minQty", Decimal("0.000001"))
-            min_notional = info.get("minNotional", Decimal("0"))
-
-            # Находим самую низкую цену среди существующих BUY ордеров
-            open_buy_orders = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
-
-            if open_buy_orders:
-                lowest_buy_price = min(o.price for o in open_buy_orders)
-                start_price = lowest_buy_price * (Decimal("1") - self.grid_step_pct)
-                log.info(f"[CREATE_BUY_AT_BOTTOM] Starting from price {start_price:.8f} (lowest existing BUY: {lowest_buy_price:.8f})")
-            else:
-                # Если нет BUY ордеров, начинаем от текущей цены минус шаг
-                start_price = current_price * (Decimal("1") - self.grid_step_pct)
-                log.info(f"[CREATE_BUY_AT_BOTTOM] No existing BUY orders, starting from price {start_price:.8f} (current_price: {current_price:.8f})")
-
-            # Проверяем доступный баланс (используем available_balance для точности)
-            quote_available = await self.ex.available_balance(self.quote_asset_name)
-            quote_balance = await self.ex.balance(self.quote_asset_name)
-            log.info(
-                f"[CREATE_BUY_AT_BOTTOM] Balance check: available={quote_available:.2f}, total={quote_balance:.2f}, order_value={self.buy_order_value:.2f}"
-            )
-
-            if quote_available < self.buy_order_value:
-                log.warning(f"[CREATE_BUY_AT_BOTTOM] Insufficient available balance: {quote_available:.2f} < {self.buy_order_value:.2f}")
-                return 0
-
-            # Лимит BUY: базовый 60; при 4,3,2,1 open SELL разрешаем 61–64 (как после исполнения SELL)
-            max_buy_orders = self.get_max_buy_orders()
-            open_sell_orders = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
-            initial_sell_count = 5
-            max_allowed_buy = max_buy_orders + (initial_sell_count - len(open_sell_orders))
-            if len(open_buy_orders) >= max_allowed_buy:
-                log.debug(
-                    f"[CREATE_BUY_AT_BOTTOM] BUY limit reached: {len(open_buy_orders)} >= {max_allowed_buy} (open SELL={len(open_sell_orders)})"
-                )
-                return 0
-
-            # Рассчитываем, сколько BUY ордеров можно создать (с учётом лимита и баланса)
-            max_orders = min(max_allowed_buy - len(open_buy_orders), 5, int(quote_available / self.buy_order_value))
-
-            created_count = 0
-            current_buy_price = start_price
-
-            for i in range(max_orders):
-                # Проверяем лимит перед каждым ордером (на случай гонок)
-                current_open_buy = len([o for o in self.orders if o.side == "BUY" and o.status == "open"])
-                if current_open_buy >= max_allowed_buy:
-                    log.debug(f"[CREATE_BUY_AT_BOTTOM] BUY limit reached during loop: {current_open_buy} >= {max_allowed_buy}")
-                    break
-                # Проверяем доступный баланс перед каждым ордером
-                current_available = await self.ex.available_balance(self.quote_asset_name)
-                if current_available < self.buy_order_value:
-                    log.info(
-                        f"[CREATE_BUY_AT_BOTTOM] Insufficient available balance for more orders: {current_available:.2f} < {self.buy_order_value:.2f}"
-                    )
-                    break
-
-                level_price = (current_buy_price // tick) * tick
-
-                if level_price <= 0:
-                    log.warning(f"[CREATE_BUY_AT_BOTTOM] Price too low: {level_price}, stopping")
-                    break
-
-                qty = (self.buy_order_value / level_price).quantize(step, rounding=ROUND_DOWN)
-                notional = qty * level_price
-                required_notional = self.get_required_notional(min_notional)
-
-                if qty >= min_qty and notional >= required_notional:
-                    try:
-                        result = await self.ex.place_limit(self.symbol, "BUY", qty, level_price, delay=0.1)
-                        if result and result.get("orderId"):
-                            order = Order(
-                                order_id=str(result.get("orderId", "")), side="BUY", price=level_price, qty=qty, amount_usdt=self.buy_order_value
-                            )
-                            self.orders.append(order)
-                            created_count += 1
-                            log.info(f"🟩 [CREATE_BUY_AT_BOTTOM] ✅ Created BUY order {i + 1} at {level_price:.8f}, qty={qty:.8f}")
-                            await asyncio.sleep(0.2)
-                    except Exception as e:
-                        log.warning(f"[CREATE_BUY_AT_BOTTOM] Failed to place BUY order at {level_price}: {e}")
-                else:
-                    log.warning(
-                        f"[CREATE_BUY_AT_BOTTOM] Validation failed: qty={qty:.8f} (min={min_qty:.8f}), notional={notional:.8f} (required={required_notional:.8f})"
-                    )
-
-                current_buy_price = current_buy_price * (Decimal("1") - self.grid_step_pct)
-
-            log.info(f"🟩 [CREATE_BUY_AT_BOTTOM] Created {created_count} BUY orders at bottom of grid")
-            return created_count
-        except Exception as e:
-            log.error(f"[CREATE_BUY_AT_BOTTOM] Error creating BUY orders at bottom: {e}", exc_info=True)
-            return 0
+    async def create_buy_orders_at_bottom(self, current_price: Decimal) -> int:
+        """Создать BUY ордера внизу сетки (реализация в grid_protection.py)."""
+        return await gp_create_buy_orders_at_bottom(self, current_price)
 
     async def rebalance_buy_grid_from_sell(self, current_price: Decimal):
         """Перестроить BUY сетку от текущей цены"""
@@ -2261,9 +1680,11 @@ class TradingBot:
 
     async def main_loop(self):
         """Основной цикл бота"""
+        set_log_context(user_id=self.user_id, symbol=self.symbol)
         log.info("[MAIN_LOOP] %s | Starting main loop, current state: %s", self._log_prefix(), self.state)
         while True:
             try:
+                set_log_context(user_id=self.user_id, symbol=self.symbol)
                 if self.state == BotState.INITIALIZING:
                     log.info("[MAIN_LOOP] %s | State: INITIALIZING - checking for existing orders", self._log_prefix())
                     # Инициализация - проверяем, есть ли уже открытые ордера

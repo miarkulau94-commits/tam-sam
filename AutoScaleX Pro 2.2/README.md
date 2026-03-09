@@ -217,6 +217,7 @@ AutoScaleX Pro 2.2/
 ├── README.md            # Документация
 ├── ARCHITECTURE_AND_SCENARIOS.md  # Архитектура и сценарии (ребаланс, 1 SELL→5 BUY, защита)
 ├── BOT_LOGIC.md         # Логика бота
+├── CONTRIBUTING.md      # Для разработчиков: тесты, где что править, доки
 ├── ORDER_EXECUTION_LOGIC.md  # Исполнение ордеров
 ├── SELL_REBALANCING.md  # Ребалансировка SELL
 ├── GRID_PROTECTION.md   # Защита большой сетки

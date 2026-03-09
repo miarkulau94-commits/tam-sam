@@ -238,6 +238,85 @@ class TestTradingBotWithMockedExchange:
             bot = TradingBot(12345, "key", "secret", symbol="KSM-USDT")
         assert bot.profit_bank == Decimal("-1.84514217971")
 
+    def test_save_state_persists_cancelled_buy_for_rebalance_prep(self, temp_dirs, mock_exchange):
+        """save_state записывает флаг cancelled_buy_for_rebalance_prep в state."""
+        import json
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_rebalance_flag")
+        os.makedirs(trades_dir, exist_ok=True)
+        saved_state = []
+
+        def capture_save(user_id, state):
+            saved_state.append(state)
+
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.persistence.save_state = capture_save
+            bot._cancelled_buy_for_rebalance_prep = True
+            bot.save_state()
+        assert len(saved_state) == 1
+        assert saved_state[0].get("cancelled_buy_for_rebalance_prep") is True
+
+    def test_load_state_restores_cancelled_buy_for_rebalance_prep_true(self, temp_dirs, mock_exchange):
+        """При загрузке state с cancelled_buy_for_rebalance_prep: true флаг восстанавливается."""
+        import json
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_rebalance_load_true")
+        os.makedirs(trades_dir, exist_ok=True)
+        state_file = os.path.join(state_dir, "user_12345.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "uid": "12345",
+                "symbol": "ETH-USDT",
+                "grid_step_pct": "0.0075",
+                "orders": [],
+                "buy_order_value": "50",
+                "cancelled_buy_for_rebalance_prep": True,
+            }, f)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+        assert bot._cancelled_buy_for_rebalance_prep is True
+
+    def test_load_state_restores_cancelled_buy_for_rebalance_prep_false_when_missing(self, temp_dirs, mock_exchange):
+        """При загрузке state без ключа cancelled_buy_for_rebalance_prep флаг остаётся False."""
+        import json
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_rebalance_load_false")
+        os.makedirs(trades_dir, exist_ok=True)
+        state_file = os.path.join(state_dir, "user_12345.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "uid": "12345",
+                "symbol": "ETH-USDT",
+                "grid_step_pct": "0.0075",
+                "orders": [],
+                "buy_order_value": "50",
+            }, f)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+        assert bot._cancelled_buy_for_rebalance_prep is False
+
 
 class TestTradingCycleIntegration:
     """Интеграционные тесты полного торгового цикла (handle_buy_filled, handle_sell_filled, sync)."""

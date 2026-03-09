@@ -199,6 +199,9 @@ class TradingBot:
                     except (ValueError, TypeError):
                         pass
 
+                # Флаг: отменили 5 BUY для ребаланса — после рестарта восстановление 5 BUY внизу работает
+                self._cancelled_buy_for_rebalance_prep = bool(state.get("cancelled_buy_for_rebalance_prep", False))
+
                 log.info(f"State loaded for user {self.user_id}")
             else:
                 # Если state пустой, используем user_id как UID
@@ -248,6 +251,7 @@ class TradingBot:
                 "symbol": self.symbol,  # Сохраняем символ
                 "orders": [o.to_dict() for o in self.orders if o.status == "open"],
                 "bot_state": int(self.state),  # TRADING=1, PAUSED=2, STOPPED=5 — для авто-восстановления при перезапуске
+                "cancelled_buy_for_rebalance_prep": getattr(self, "_cancelled_buy_for_rebalance_prep", False),
             }
             log.debug(f"Saving state: grid_step_pct={self.grid_step_pct} ({self.grid_step_pct * 100:.2f}%), uid={self.uid}")
             self.persistence.save_state(self.user_id, state)
@@ -1421,8 +1425,8 @@ class TradingBot:
         else:
             log.info(f"[REBALANCING] Skipping BUY at bottom: sell_created_count={sell_created_count} (need >=3)")
 
-        await asyncio.to_thread(self.save_state)
         self._cancelled_buy_for_rebalance_prep = False
+        await asyncio.to_thread(self.save_state)
         log.info("[REBALANCING] ✅ Rebalancing completed successfully")
         return True
 

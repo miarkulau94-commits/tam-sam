@@ -952,7 +952,7 @@ class TestTradingCycleIntegrationContinued:
 
     @pytest.mark.asyncio
     async def test_handle_sell_filled_at_max_profit_still_added_no_new_buy(self, temp_dirs, mock_exchange):
-        """При 61 BUY и 4 открытых SELL после handle_sell_filled прибыль копится, новый BUY не создаётся (лимит 61)."""
+        """При 61 BUY и 4 открытых SELL после handle_sell_filled прибыль копится (<= PROFIT_BANK_MAX), новый BUY не создаётся (лимит 61)."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_max2")
         os.makedirs(trades_dir, exist_ok=True)
@@ -971,7 +971,8 @@ class TestTradingCycleIntegrationContinued:
         ):
             bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
             bot.grid_step_pct = Decimal("0.015")  # 1.5% -> max 60 BUY, после SELL разрешено 61–64
-            bot.position_manager.add_position(Decimal("100"), Decimal("0.005"))
+            # Позиция на полный объём продажи по одной цене, чтобы прибыль с одной SELL <= PROFIT_BANK_MAX_PROFIT_PER_SELL (9)
+            bot.position_manager.add_position(Decimal("100"), Decimal("0.1"))
             # 61 BUY + 5 SELL (один заполним) — после заполнения 1 SELL останется 61 BUY и 4 SELL, лимит 61
             bot.orders = [
                 Order(f"buy_{i}", "BUY", Decimal("100") - Decimal(i) * Decimal("0.5"), Decimal("0.1"), status="open")

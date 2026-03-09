@@ -135,6 +135,14 @@ class TradingBot:
                             log.debug(f"profit_bank loaded from user_data: {self.profit_bank}")
                     except (TypeError, ValueError, OSError) as e:
                         log.debug(f"Could not load profit_bank from user_data: {e}")
+
+                # Восстанавливаем FIFO-позиции из истории сделок, чтобы profit при следующих SELL считался верно (не «призрачная» прибыль)
+                if self.statistics and getattr(self.statistics, "trades", None) and self.statistics.trades:
+                    n_restored = self.position_manager.restore_from_trades(
+                        self.statistics.trades, config.FEE_RATE, self.symbol
+                    )
+                    log.debug(f"PositionManager restored from {len(self.statistics.trades)} trades ({n_restored} positions) in load_state")
+
                 self.total_executed_buys = state.get("total_executed_buys", 0)
                 self.total_executed_sells = state.get("total_executed_sells", 0)
                 self.initial_equity = Decimal(str(state.get("initial_equity", "0")))

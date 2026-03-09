@@ -5,9 +5,8 @@
 
 Использование:
   python scripts/fix_profit_bank_ksm.py path/to/35812365.json
-
-Или с указанием какой именно profit обнулить (по timestamp или по индексу SELL):
-  python scripts/fix_profit_bank_ksm.py path/to/35812365.json --timestamp "2026-03-08T02:13:03"
+  python scripts/fix_profit_bank_ksm.py path/to/file.json --symbol ETH-USDT
+  python scripts/fix_profit_bank_ksm.py path/to/file.json --symbol DOT-USDT --timestamp "2026-03-10T03:25:25"
 """
 import json
 import os
@@ -63,12 +62,22 @@ def fix_profit_bank_in_data(
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python fix_profit_bank_ksm.py <path_to_35812365.json> [--timestamp ISO_TIMESTAMP]")
+        print("Usage: python fix_profit_bank_ksm.py <path_to_file.json> [--symbol SYMBOL] [--timestamp ISO_TIMESTAMP]")
         sys.exit(1)
     path = sys.argv[1]
     target_timestamp = None
-    if len(sys.argv) >= 4 and sys.argv[2] == "--timestamp":
-        target_timestamp = sys.argv[3]
+    symbol = "KSM-USDT"
+    args = sys.argv[2:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--timestamp" and i + 1 < len(args):
+            target_timestamp = args[i + 1]
+            i += 2
+        elif args[i] == "--symbol" and i + 1 < len(args):
+            symbol = args[i + 1]
+            i += 2
+        else:
+            i += 1
     if not os.path.isfile(path):
         print(f"File not found: {path}")
         sys.exit(1)
@@ -76,8 +85,8 @@ def main() -> None:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    if not fix_profit_bank_in_data(data, target_timestamp=target_timestamp):
-        print("Target SELL trade (erroneous profit ~20.22) not found. No changes.")
+    if not fix_profit_bank_in_data(data, symbol=symbol, target_timestamp=target_timestamp):
+        print("Target SELL trade not found. No changes.")
         sys.exit(0)
 
     with open(path, "w", encoding="utf-8") as f:

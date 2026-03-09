@@ -91,3 +91,7 @@ REBALANCE_PREP_CANCEL_BUY_COUNT = 5
 # Порог открытых ордеров для защиты «3 BUY → добавить до 5 BUY внизу»: только при «большой» сетке
 PROTECTION_THRESHOLD_1_5_PCT = 62   # шаг сетки 1.5%
 PROTECTION_THRESHOLD_0_75_PCT = 127  # шаг сетки 0.75%
+
+# Защита Profit Bank: не зачислять в profit_bank прибыль выше этой с одной SELL (защита от ошибочного/призрачного расчёта при пустых FIFO-позициях)
+# 9 USDT — при минимальных ордерах от 10 USDT нормальная прибыль с одной SELL всегда меньше
+PROFIT_BANK_MAX_PROFIT_PER_SELL = Decimal(os.getenv("PROFIT_BANK_MAX_PROFIT_PER_SELL", "9"))

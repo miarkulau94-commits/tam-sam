@@ -2,8 +2,9 @@
 Интеграция с биржей BingX (Spot API).
 
 CircuitBreaker: защита от каскадных ошибок (5 неудач → OPEN, 60с таймаут).
-RateLimiter: 90 req/min на экземпляр.
-Retry: 3 попытки с экспоненциальной задержкой.
+Глобальный rate limiter: 40 RPS на процесс (все экземпляры BingXSpot).
+RateLimiter на экземпляр: 90 req/min.
+Retry: до 4 попыток при 429 (rate limit), 3 при timeout/5xx; экспоненциальная задержка.
 
 BingXSpotAsync: асинхронная обёртка — вызовы выполняются в thread pool,
 чтобы не блокировать event loop при большом числе пользователей.
@@ -118,6 +119,60 @@ class CircuitBreaker:
 RATE_LIMIT_DEFAULT = 90
 RATE_INTERVAL = 60
 
+# Глобальный лимит на процесс (BingX ~50 RPS на IP) — все запросы через один лимитер
+GLOBAL_RPS_LIMIT = 40
+GLOBAL_RPS_INTERVAL = 1
+
+# Общий (process-wide) rate limiter — один на весь процесс, не останавливается при close()
+_global_bingx_rps_limiter: Optional["RateLimiter"] = None
+_global_limiter_lock = threading.Lock()
+
+
+def _get_global_rps_limiter() -> "RateLimiter":
+    """Ленивая инициализация глобального лимитера 40 RPS."""
+    global _global_bingx_rps_limiter
+    if _global_bingx_rps_limiter is None:
+        with _global_limiter_lock:
+            if _global_bingx_rps_limiter is None:
+                _global_bingx_rps_limiter = RateLimiter(
+                    rate_limit=GLOBAL_RPS_LIMIT,
+                    interval=GLOBAL_RPS_INTERVAL,
+                )
+    return _global_bingx_rps_limiter
+
+
+# Метрики запросов/ошибок за последнюю минуту (опционально для мониторинга)
+_api_metrics_timestamps: List[float] = []
+_api_errors_timestamps: List[float] = []
+_metrics_lock = threading.Lock()
+_METRICS_WINDOW = 60.0
+
+
+def _record_request():
+    t = time.time()
+    with _metrics_lock:
+        _api_metrics_timestamps.append(t)
+        # оставляем только последние 60 сек
+        while _api_metrics_timestamps and t - _api_metrics_timestamps[0] > _METRICS_WINDOW:
+            _api_metrics_timestamps.pop(0)
+
+
+def _record_error():
+    t = time.time()
+    with _metrics_lock:
+        _api_errors_timestamps.append(t)
+        while _api_errors_timestamps and t - _api_errors_timestamps[0] > _METRICS_WINDOW:
+            _api_errors_timestamps.pop(0)
+
+
+def get_api_metrics_last_minute() -> Dict[str, int]:
+    """Запросов и ошибок за последние 60 секунд (для мониторинга)."""
+    t = time.time()
+    with _metrics_lock:
+        r = sum(1 for ts in _api_metrics_timestamps if t - ts <= _METRICS_WINDOW)
+        e = sum(1 for ts in _api_errors_timestamps if t - ts <= _METRICS_WINDOW)
+    return {"requests": r, "errors": e}
+
 
 class RateLimiter:
     """Rate limiter на экземпляр — каждый пользователь (API ключ) имеет свой лимит"""
@@ -191,14 +246,15 @@ class BingXSpot:
         return payload
 
     def _request(self, method, endpoint, params=None):
-        """Выполнить запрос с circuit breaker и экспоненциальной задержкой"""
+        """Выполнить запрос с circuit breaker, глобальным 40 RPS лимитом и ретраями (429/5xx/timeout)."""
         
         def _make_request():
+            _get_global_rps_limiter().wait()
             self.rate_limiter.wait()
             url = self.base_url + endpoint
             headers = {"X-BX-APIKEY": self.key}
             
-            max_attempts = 3
+            max_attempts = 4  # 4 попытки для 429, для остальных последняя — после 3-й
             for attempt in range(1, max_attempts + 1):
                 try:
                     params_copy = params.copy() if params else {}
@@ -216,6 +272,7 @@ class BingXSpot:
                     data = r.json()
                     if data.get("code") != 0:
                         raise RuntimeError(data.get("msg"))
+                    _record_request()
                     # Адаптивная пауза по заголовкам BingX (лимит по эндпоинту, сброс через Expire)
                     try:
                         remain_str = r.headers.get("X-RateLimit-Requests-Remain")
@@ -234,7 +291,17 @@ class BingXSpot:
                         pass
                     return data.get("data", data)
                 except Exception as e:
+                    _record_error()
                     error_msg = str(e)
+                    # HTTP 429 / 5xx из raise_for_status()
+                    status_code = None
+                    if hasattr(e, "response") and e.response is not None and hasattr(e.response, "status_code"):
+                        status_code = e.response.status_code
+                    is_5xx = (
+                        status_code is not None
+                        and 500 <= status_code < 600
+                    )
+                    is_http_429 = status_code == 429
                     is_api_key_error = "Incorrect apiKey" in error_msg or "api key" in error_msg.lower()
                     if is_api_key_error:
                         error_log.warning("API key rejected (no retry)")
@@ -258,29 +325,34 @@ class BingXSpot:
                         "timed out" in error_msg.lower()
                     )
                     is_rate_limit = (
-                        "rate limit" in error_msg.lower()
+                        is_http_429
+                        or "rate limit" in error_msg.lower()
                         or "too many requests" in error_msg.lower()
                         or "frequency limit" in error_msg.lower()  # BingX code 100410
                     )
                     is_non_critical_error = is_non_critical_api_error(error_msg)
-                    # Rate limit ретраим с длинной паузой, не бросаем сразу
-                    if is_non_critical_error and not is_rate_limit:
+                    if is_non_critical_error and not is_rate_limit and not is_5xx:
                         error_log.debug("API (non-critical)")
                         raise RuntimeError(error_msg)
+                    retry_reason = "rate_limit" if is_rate_limit else ("5xx" if is_5xx else ("timeout" if is_timeout_error else "error"))
                     if is_rate_limit:
-                        error_log.warning(f"API rate limited (attempt {attempt}/{max_attempts})")
+                        error_log.warning("API rate limited (attempt %s/%s, reason=%s)", attempt, max_attempts, retry_reason)
+                    elif is_5xx:
+                        error_log.warning("API server error 5xx (attempt %s/%s, reason=%s)", attempt, max_attempts, retry_reason)
                     elif is_timeout_error:
-                        error_log.warning(f"API timeout (attempt {attempt}/{max_attempts})")
+                        error_log.warning("API timeout (attempt %s/%s, reason=%s)", attempt, max_attempts, retry_reason)
                     else:
-                        error_log.error(f"API failed (attempt {attempt}/{max_attempts}), error type: {type(e).__name__}")
+                        error_log.error("API failed (attempt %s/%s, reason=%s), error type: %s", attempt, max_attempts, retry_reason, error_type)
                     if attempt < max_attempts:
                         if is_rate_limit:
-                            delay = 18 * attempt  # 18, 36, 54 сек — даём бирже время снять лимит (масштаб 100+ юзеров)
-                            error_log.info(f"Waiting {delay}s before retry (rate limit)...")
+                            delay = 75 if attempt == 3 else (18 * attempt)  # перед 2-й: 18с, 3-й: 36с, 4-й: 75с
+                            error_log.info("Waiting %ss before retry (reason=%s, attempt=%s)...", delay, retry_reason, attempt)
+                        elif is_5xx or is_timeout_error:
+                            delay = 5 * attempt
+                            error_log.info("Waiting %ss before retry (reason=%s, attempt=%s)...", delay, retry_reason, attempt)
                         else:
-                            delay = 5 * attempt if is_timeout_error else 2 ** attempt
-                            if is_timeout_error:
-                                error_log.info(f"Waiting {delay}s before retry due to timeout...")
+                            delay = 2 ** attempt
+                            error_log.info("Waiting %ss before retry (reason=%s, attempt=%s)...", delay, retry_reason, attempt)
                         time.sleep(delay)
                     else:
                         if is_timeout_error:
@@ -295,6 +367,11 @@ class BingXSpot:
                         elif is_rate_limit:
                             error_msg_full = (
                                 f"API BingX: превышен лимит запросов (rate limit) после {max_attempts} попыток. "
+                                f"Повторите действие через минуту."
+                            )
+                        elif is_5xx:
+                            error_msg_full = (
+                                f"API BingX: ошибка сервера (5xx) после {max_attempts} попыток. "
                                 f"Повторите действие через минуту."
                             )
                         else:

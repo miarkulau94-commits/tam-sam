@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from exchange import CircuitBreaker, CircuitState
+from exchange import CircuitBreaker, CircuitState, get_api_metrics_last_minute, _get_global_rps_limiter
 
 
 class TestCircuitBreaker:
@@ -240,7 +240,7 @@ class TestBingXSpotRateLimitRetry:
         r = Mock()
         r.raise_for_status = lambda: None
         r.json = lambda: {"code": 429, "msg": "rate limited"}
-        with patch.object(ex.sess, "get", side_effect=[r, r, r]):
+        with patch.object(ex.sess, "get", side_effect=[r, r, r, r]):
             with patch("exchange.time.sleep"):
                 with pytest.raises(RuntimeError, match="rate limit|превышен лимит"):
                     ex.balance("USDT")
@@ -330,3 +330,68 @@ class TestBingXSpotRateLimitRetry:
         assert result == Decimal("100")
         mock_sleep.assert_called_once()
         assert mock_sleep.call_args[0][0] == 60.0
+
+    def test_rate_limit_fourth_attempt_uses_75s_delay(self):
+        """При 429: перед 4-й попыткой пауза 75 с (3-й sleep)."""
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r_fail = Mock()
+        r_fail.raise_for_status = lambda: None
+        r_fail.json = lambda: {"code": 429, "msg": "rate limited"}
+        r_ok = Mock()
+        r_ok.raise_for_status = lambda: None
+        r_ok.json = lambda: {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "100", "locked": "0"}]}}
+
+        with patch.object(ex.sess, "get", side_effect=[r_fail, r_fail, r_fail, r_ok]):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+        assert result == Decimal("100")
+        assert mock_sleep.call_count == 3
+        assert mock_sleep.call_args_list[0][0][0] == 18
+        assert mock_sleep.call_args_list[1][0][0] == 36
+        assert mock_sleep.call_args_list[2][0][0] == 75
+
+    def test_5xx_retries_then_succeeds(self):
+        """При HTTP 502/503 — ретраи с паузой 5*attempt, затем успех."""
+        import requests
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        def raise_502():
+            err = requests.exceptions.HTTPError()
+            err.response = Mock(status_code=502)
+            raise err
+
+        ex = BingXSpot("k", "s")
+        r_fail = Mock()
+        r_fail.raise_for_status = raise_502
+        r_fail.json = lambda: None
+        r_ok = Mock()
+        r_ok.raise_for_status = lambda: None
+        r_ok.json = lambda: {"code": 0, "data": {"balances": [{"asset": "USDT", "free": "100", "locked": "0"}]}}
+
+        with patch.object(ex.sess, "get", side_effect=[r_fail, r_ok]):
+            with patch("exchange.time.sleep") as mock_sleep:
+                result = ex.balance("USDT")
+        assert result == Decimal("100")
+        mock_sleep.assert_called_once()
+        assert mock_sleep.call_args[0][0] == 5
+
+
+class TestGlobalRateLimiterAndMetrics:
+    """Глобальный лимитер 40 RPS и метрики запросов/ошибок."""
+
+    def test_global_rps_limiter_exists(self):
+        limiter = _get_global_rps_limiter()
+        assert limiter is not None
+        assert hasattr(limiter, "wait")
+
+    def test_get_api_metrics_last_minute_returns_dict(self):
+        m = get_api_metrics_last_minute()
+        assert isinstance(m, dict)
+        assert "requests" in m
+        assert "errors" in m
+        assert m["requests"] >= 0
+        assert m["errors"] >= 0

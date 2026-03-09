@@ -751,9 +751,12 @@ class TradingBot:
                 min_qty = info.get("minQty", Decimal("0.000001"))
                 min_notional = info.get("minNotional", Decimal("0"))
 
-                # Цена SELL = цена покупки + шаг сетки
+                # Цена SELL = цена покупки + шаг сетки (округление до ближайшего тика, как и для BUY после SELL)
                 sell_price = price * (Decimal("1") + self.grid_step_pct)
-                sell_price = (sell_price // tick) * tick
+                if tick > 0:
+                    sell_price = (sell_price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+                else:
+                    sell_price = (sell_price // tick) * tick
                 log.info(f"[CREATE_SELL_AFTER_BUY] Calculated SELL price: {price:.8f} * (1 + {self.grid_step_pct:.6f}) = {sell_price:.8f}")
 
                 # Доступный объём для SELL — реальный free с биржи (избегаем занижения из-за расхождения памяти и биржи)

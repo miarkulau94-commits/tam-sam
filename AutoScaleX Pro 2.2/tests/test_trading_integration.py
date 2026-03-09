@@ -326,6 +326,43 @@ class TestTradingCycleIntegration:
         assert "ETH" in calls, "available_balance должен вызываться для базового актива (ETH)"
 
     @pytest.mark.asyncio
+    async def test_sell_after_buy_price_rounds_to_nearest_tick(self, temp_dirs, mock_exchange):
+        """После BUY цена SELL округляется до ближайшего тика: 1.44 * 1.015 = 1.4616 → 1.462 (tick 0.001), не 1.461 (floor)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_sell_tick")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.side_effect = lambda a: Decimal("0.01") if "DOT" in a else Decimal("500")
+        mock_exchange.available_balance.return_value = Decimal("0.01")
+        mock_exchange.place_limit.return_value = {"orderId": "sell_after_buy_tick"}
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.001"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
+            bot.grid_step_pct = Decimal("0.015")  # 1.5%
+            order = Order("buy1", "BUY", Decimal("1.44"), Decimal("7"), status="open")
+            order.amount_usdt = Decimal("10")
+            await bot.handle_buy_filled(order, Decimal("1.44"))
+        mock_exchange.place_limit.assert_called_once()
+        call_args = mock_exchange.place_limit.call_args[0]
+        assert call_args[1] == "SELL"
+        placed_price = call_args[3]
+        # 1.44 * 1.015 = 1.4616 → nearest tick 0.001 = 1.462 (не floor 1.461)
+        assert placed_price == Decimal("1.462"), "SELL price must round to nearest tick (1.462), not floor (1.461)"
+
+    @pytest.mark.asyncio
     async def test_handle_sell_filled_adds_profit(self, temp_dirs, mock_exchange):
         """После handle_sell_filled profit_bank увеличивается."""
         state_dir, user_data_dir = temp_dirs

@@ -183,7 +183,7 @@ python main.py
 - Уровни: VWAP × (1 + 2%), VWAP × (1 + 4%), VWAP × (1 + 6%)
 - Весь объём распределяется равномерно
 
-📖 **Подробнее:** `BOT_LOGIC.md`, `ORDER_EXECUTION_LOGIC.md`, `SELL_REBALANCING.md`, `GRID_PROTECTION.md`
+📖 **Подробнее:** `ARCHITECTURE_AND_SCENARIOS.md` (архитектура и сценарии), `BOT_LOGIC.md`, `ORDER_EXECUTION_LOGIC.md`, `SELL_REBALANCING.md`, `GRID_PROTECTION.md`
 
 ## Сохранение состояния
 
@@ -215,6 +215,7 @@ AutoScaleX Pro 2.2/
 ├── requirements.txt     # Зависимости
 ├── env.example          # Пример .env файла
 ├── README.md            # Документация
+├── ARCHITECTURE_AND_SCENARIOS.md  # Архитектура и сценарии (ребаланс, 1 SELL→5 BUY, защита)
 ├── BOT_LOGIC.md         # Логика бота
 ├── ORDER_EXECUTION_LOGIC.md  # Исполнение ордеров
 ├── SELL_REBALANCING.md  # Ребалансировка SELL

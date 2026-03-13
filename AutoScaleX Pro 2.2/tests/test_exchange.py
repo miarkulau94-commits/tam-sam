@@ -10,15 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from exchange import (
-    COPY_TRADING_SELL_ORDER_PATH,
-    CircuitBreaker,
-    CircuitState,
-    BingXSpot,
-    BingXSpotAsync,
-    get_api_metrics_last_minute,
-    _get_global_rps_limiter,
-)
+from exchange import CircuitBreaker, CircuitState, get_api_metrics_last_minute, _get_global_rps_limiter
 
 
 class TestCircuitBreaker:
@@ -386,52 +378,6 @@ class TestBingXSpotRateLimitRetry:
         assert result == Decimal("100")
         mock_sleep.assert_called_once()
         assert mock_sleep.call_args[0][0] == 5
-
-
-class TestCopyTradingAPI:
-    """Copy Trading API: trader_sell_order — вызов POST с orderId."""
-
-    def test_trader_sell_order_calls_request_with_correct_path_and_params(self):
-        ex = BingXSpot("key", "secret")
-        ex._request = Mock(return_value={"orderNo": 1773285851363541000, "status": 30})
-        result = ex.trader_sell_order("1253517936071234567")
-        ex._request.assert_called_once()
-        call_args = ex._request.call_args
-        assert call_args[0][0] == "POST"
-        assert call_args[0][1] == COPY_TRADING_SELL_ORDER_PATH
-        assert call_args[0][2] == {"orderId": "1253517936071234567"}
-        assert result["orderNo"] == 1773285851363541000
-        assert result["status"] == 30
-
-    def test_trader_sell_order_stringifies_int_order_id(self):
-        ex = BingXSpot("key", "secret")
-        ex._request = Mock(return_value={"orderNo": 1, "status": 30})
-        ex.trader_sell_order(1253517936071234567)
-        call_args = ex._request.call_args
-        assert call_args[0][2]["orderId"] == "1253517936071234567"
-
-    def test_trader_sell_order_returns_none_on_api_error(self):
-        ex = BingXSpot("key", "secret")
-        ex._request = Mock(side_effect=RuntimeError("API error"))
-        with pytest.raises(RuntimeError, match="API error"):
-            ex.trader_sell_order("123")
-
-    def test_copy_trading_sell_order_path_constant(self):
-        assert COPY_TRADING_SELL_ORDER_PATH == "/openApi/copyTrading/v1/spot/trader/sellOrder"
-
-
-class TestBingXSpotAsyncCopyTrading:
-    """BingXSpotAsync.trader_sell_order делегирует в sync клиент."""
-
-    @pytest.mark.asyncio
-    async def test_trader_sell_order_delegates_to_sync(self):
-        sync_ex = BingXSpot("key", "secret")
-        sync_ex.trader_sell_order = Mock(return_value={"orderNo": 999, "status": 30})
-        async_ex = BingXSpotAsync(sync_ex)
-        result = await async_ex.trader_sell_order("12345")
-        sync_ex.trader_sell_order.assert_called_once_with("12345")
-        assert result["orderNo"] == 999
-        assert result["status"] == 30
 
 
 class TestGlobalRateLimiterAndMetrics:

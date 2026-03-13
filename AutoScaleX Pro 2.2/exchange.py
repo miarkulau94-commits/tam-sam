@@ -1,5 +1,8 @@
 """
-Интеграция с биржей BingX (Spot API).
+Интеграция с биржей BingX (Spot API и Copy Trading API).
+
+Spot: /openApi/spot/v1/...
+Copy Trading: /openApi/copyTrading/v1/spot/trader/sellOrder (продажа по номеру BUY-ордера).
 
 CircuitBreaker: защита от каскадных ошибок (5 неудач → OPEN, 60с таймаут).
 Глобальный rate limiter: 40 RPS на процесс (все экземпляры BingXSpot).
@@ -17,6 +20,7 @@ import hashlib
 import logging
 import requests
 import threading
+import urllib.parse
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -36,6 +40,10 @@ except ImportError:
     is_non_critical_api_error = lambda m: False
     is_telegram_critical = lambda m: True
     get_user_friendly_message = lambda e, c="": None
+
+# Copy Trading API (BingX): эндпоинты
+# Документация: https://bingx-api.github.io/docs-v3/#/en/Copy%20Trade/Spot%20Trading/
+COPY_TRADING_SELL_ORDER_PATH = "/openApi/copyTrading/v1/spot/trader/sellOrder"
 
 
 class CircuitState(Enum):
@@ -266,6 +274,11 @@ class BingXSpot:
                         r = self.sess.get(url, params=params_copy, headers=headers, timeout=10)
                     elif method_upper == "DELETE":
                         r = self.sess.delete(url, params=params_copy, headers=headers, timeout=10)
+                    elif method_upper == "POST" and "copyTrading" in endpoint:
+                        # Copy Trading API: параметры в URL (как в документации BingX)
+                        query = urllib.parse.urlencode(sorted(params_copy.items()))
+                        url_with_query = f"{url}?{query}"
+                        r = self.sess.post(url_with_query, headers=headers, timeout=10)
                     else:
                         r = self.sess.post(url, data=params_copy, headers=headers, timeout=10)
                     r.raise_for_status()
@@ -735,7 +748,15 @@ class BingXSpot:
             "symbol": symbol,
             "orderId": order_id
         })
-    
+
+    def trader_sell_order(self, order_id) -> Optional[Dict]:
+        """
+        Copy Trading API: продажа спотового актива по номеру ордера на покупку (trader).
+        POST /openApi/copyTrading/v1/spot/trader/sellOrder
+        order_id — номер спотового BUY-ордера трейдера (int64).
+        """
+        return self._request("POST", COPY_TRADING_SELL_ORDER_PATH, {"orderId": str(order_id)})
+
     def get_referrals_from_api(self, page: int = 1, page_size: int = 50):
         """Получить список рефералов через Agent API"""
         try:
@@ -899,6 +920,10 @@ class BingXSpotAsync:
 
     async def get_order(self, symbol: str, order_id: str):
         return await asyncio.to_thread(self._sync.get_order, symbol, order_id)
+
+    async def trader_sell_order(self, order_id):
+        """Copy Trading API: продажа по номеру BUY-ордера трейдера."""
+        return await asyncio.to_thread(self._sync.trader_sell_order, order_id)
 
     async def _request(self, method: str, endpoint: str, params: dict = None):
         return await asyncio.to_thread(self._sync._request, method, endpoint, params)

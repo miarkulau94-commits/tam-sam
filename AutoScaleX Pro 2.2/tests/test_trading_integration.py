@@ -634,8 +634,8 @@ class TestTradingCycleIntegration:
             assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 61
 
     @pytest.mark.asyncio
-    async def test_create_buy_after_sell_price_rounds_to_nearest_tick_not_floor(self, temp_dirs, mock_exchange):
-        """При шаге 1.5% и sell_price=1.46 цена BUY округляется до ближайшего тика (1.44), а не вниз (1.43)."""
+    async def test_create_buy_after_sell_price_aligned_to_tick(self, temp_dirs, mock_exchange):
+        """При шаге 1.5% и sell_price=1.46: new_buy = 1.46*0.985 = 1.4381, выравнивание по tick вниз → 1.43."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_nearest_tick")
         os.makedirs(trades_dir, exist_ok=True)
@@ -669,12 +669,12 @@ class TestTradingCycleIntegration:
                 Order(f"sell_{j}", "SELL", Decimal("1.5") + Decimal(j) * Decimal("0.02"), Decimal("7"), status="open")
                 for j in range(4)
             ]
-            # 1.46 * (1 - 0.015) = 1.4381 -> nearest tick 0.01 = 1.44 (не 1.43)
+            # 1.46 * (1 - 0.015) = 1.4381; (// tick) * tick = 1.43
             result = await bot.create_buy_after_sell(Decimal("1.46"))
             assert result is True
             mock_exchange.place_limit.assert_called_once()
             placed_price = mock_exchange.place_limit.call_args[0][3]
-            assert placed_price == Decimal("1.44"), "BUY price must round to nearest tick (1.44), not floor (1.43)"
+            assert placed_price == Decimal("1.43")
 
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_allows_62_63_64_by_open_sell_count(self, temp_dirs, mock_exchange):

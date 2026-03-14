@@ -35,7 +35,7 @@
   ```
 - **Конкретный модуль:** например, `python -m pytest tests/test_trading_integration.py tests/test_exchange.py -v`.
 
-Тесты используют моки биржи и persistence, реальные API ключи не нужны.
+Тесты используют моки биржи и persistence, реальные API ключи не нужны. Тестов против живого API BingX нет; в продакшене конфиг задаётся через `.env`.
 
 ---
 

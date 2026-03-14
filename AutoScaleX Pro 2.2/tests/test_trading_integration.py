@@ -804,7 +804,8 @@ class TestTradingCycleIntegration:
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_buy_after_buy")
         os.makedirs(trades_dir, exist_ok=True)
         mock_exchange.balance.return_value = Decimal("1000")
-        mock_exchange.place_limit = AsyncMock(return_value={"orderId": "new_buy_1"})
+        # place_limit вызывается из потока (to_thread), поэтому MagicMock — без AsyncMock, иначе корутина не ожидается
+        mock_exchange.place_limit = MagicMock(return_value={"orderId": "new_buy_1"})
         mock_exchange.symbol_info.return_value = {
             "stepSize": Decimal("0.0001"),
             "tickSize": Decimal("0.01"),
@@ -1517,8 +1518,9 @@ class TestFullCycleIntegration:
             "minNotional": Decimal("0"),
             "status": "TRADING",
         }
-        ex._request = AsyncMock(return_value={})
-        ex.invalidate_balance_cache = AsyncMock()
+        # Вызываются из потока (to_thread) — MagicMock, иначе корутина AsyncMock не ожидается → RuntimeWarning
+        ex._request = MagicMock(return_value={})
+        ex.invalidate_balance_cache = MagicMock(return_value=None)
         return ex
 
     @pytest.mark.asyncio

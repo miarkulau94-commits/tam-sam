@@ -12,12 +12,16 @@ cp env.example .env
 
 ## 2. Настройка .env
 
-Откройте `.env` и заполните:
+Откройте `.env` и заполните **обязательные** переменные:
 
 ```env
 TG_TOKEN=ваш_telegram_бот_токен
+ENCRYPTION_SECRET=длинная_случайная_строка_для_шифрования_API_ключей
 TG_ADMIN_ID=ваш_telegram_id
 ```
+
+- **TG_TOKEN** и **ENCRYPTION_SECRET** — обязательны; без них бот не запустится. `ENCRYPTION_SECRET` используется для шифрования API ключей пользователей (BingX) в хранилище.
+- **TG_ADMIN_ID** — опционально (0 = отключена админка).
 
 Для получения Telegram ID используйте бота @userinfobot
 

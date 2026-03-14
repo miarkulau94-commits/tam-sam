@@ -132,7 +132,7 @@ async def create_buy_orders_at_bottom(bot: "TradingBot", current_price: Decimal)
                 )
                 break
 
-            level_price = (current_buy_price // tick) * tick
+            level_price = bot._align_to_tick(current_buy_price, tick)
 
             if level_price <= 0:
                 log.warning(f"[CREATE_BUY_AT_BOTTOM] Price too low: {level_price}, stopping")

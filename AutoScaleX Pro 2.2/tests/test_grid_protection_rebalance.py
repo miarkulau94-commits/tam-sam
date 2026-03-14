@@ -5,7 +5,7 @@ Unit-тесты для модулей grid_protection и rebalance (отмена
 import os
 import sys
 import tempfile
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -83,6 +83,13 @@ class TestGridProtectionCreateBuyAtBottom:
         bot.ex.place_limit = AsyncMock(return_value={"orderId": "new_1"})
         bot.get_required_notional = MagicMock(return_value=Decimal("0"))
         bot.get_max_buy_orders = MagicMock(return_value=60)
+
+        def _align_to_tick(price, tick):
+            if not tick or tick <= 0:
+                return price
+            return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
+        bot._align_to_tick = MagicMock(side_effect=_align_to_tick)
         return bot
 
     @pytest.mark.asyncio

@@ -364,6 +364,12 @@ class TradingBot:
             return config.PROTECTION_THRESHOLD_1_5_PCT
         return int(config.PROTECTION_THRESHOLD_0_75_PCT - (step_pct - 0.0075) / 0.0075 * (config.PROTECTION_THRESHOLD_0_75_PCT - config.PROTECTION_THRESHOLD_1_5_PCT))
 
+    def _align_to_tick(self, price: Decimal, tick: Decimal) -> Decimal:
+        """Выравнивание цены до ближайшего тика (round to nearest)."""
+        if not tick or tick <= 0:
+            return price
+        return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
     async def calculate_active_buy_orders_count(self) -> int:
         """Рассчитать количество активных BUY ордеров
         Рассчитывается на основе баланса и прибыли, без фиксированного минимума
@@ -464,7 +470,7 @@ class TradingBot:
         current_sell_price = price * (Decimal("1") + self.grid_step_pct)
         created = 0
         for i in range(config.SELL_ORDERS_COUNT):
-            level_price = (current_sell_price // tick) * tick
+            level_price = self._align_to_tick(current_sell_price, tick)
             if level_price <= 0:
                 current_sell_price = current_sell_price * (Decimal("1") + self.grid_step_pct)
                 continue
@@ -504,7 +510,7 @@ class TradingBot:
             if current_buy_price < price * Decimal("0.1"):
                 log.warning(f"Buy price too low, stopping at order {i + 1}/{buy_count}")
                 break
-            level_price = (current_buy_price // tick) * tick
+            level_price = self._align_to_tick(current_buy_price, tick)
             if level_price <= 0 or level_price < tick:
                 current_buy_price = current_buy_price * (Decimal("1") - self.grid_step_pct)
                 continue
@@ -678,7 +684,7 @@ class TradingBot:
 
             for i, multiplier in enumerate(config.CRITICAL_GRID_STEP_MULTIPLIER, 1):
                 level_price = self.vwap * (Decimal("1") + self.grid_step_pct * Decimal(multiplier))
-                level_price = (level_price // tick) * tick
+                level_price = self._align_to_tick(level_price, tick)
 
                 if level_price <= 0:
                     log.warning(f"SELL order {i}: level_price is zero or negative: {level_price}, skipping")
@@ -796,7 +802,7 @@ class TradingBot:
                 info = await self.ex.symbol_info(self.symbol)
                 step = info["stepSize"]
                 tick = info["tickSize"]
-                new_price = (new_price // tick) * tick
+                new_price = self._align_to_tick(new_price, tick)
 
                 # Защита от дубля: если на основной цене уже есть BUY — пробуем запасной шаг (1% при шаге 1.5%, 0.5% при 0.75%)
                 existing_buy = any(o.side == "BUY" and abs(o.price - new_price) < tick and o.status == "open" for o in self.orders)
@@ -809,7 +815,7 @@ class TradingBot:
                         elif abs(step_float - 0.0075) < 0.0001:
                             fallback_step_pct = Decimal("0.005")  # 0.5%
                     if fallback_step_pct is not None:
-                        fallback_price = (lowest_order.price * (Decimal("1") - fallback_step_pct) // tick) * tick
+                        fallback_price = self._align_to_tick(lowest_order.price * (Decimal("1") - fallback_step_pct), tick)
                         existing_at_fallback = any(
                             o.side == "BUY" and abs(o.price - fallback_price) < tick and o.status == "open" for o in self.orders
                         )
@@ -952,7 +958,7 @@ class TradingBot:
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
             if tick and tick > 0:
-                new_buy_price = (new_buy_price // tick) * tick
+                new_buy_price = self._align_to_tick(new_buy_price, tick)
             qty = (self.buy_order_value / new_buy_price).quantize(step, rounding=ROUND_DOWN)
             buy_notional = qty * new_buy_price
             required_notional = self.get_required_notional(min_notional)
@@ -1047,7 +1053,7 @@ class TradingBot:
             step = info["stepSize"]
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
-            new_buy_price = (new_buy_price // tick) * tick
+            new_buy_price = self._align_to_tick(new_buy_price, tick)
             qty = (self.buy_order_value / new_buy_price).quantize(step, rounding=ROUND_DOWN)
             buy_notional = qty * new_buy_price
             required_notional = self.get_required_notional(min_notional)
@@ -1118,7 +1124,7 @@ class TradingBot:
             min_notional = info.get("minNotional", Decimal("0"))
 
             # Рассчитываем цену и проверяем количество
-            new_sell_price = (new_sell_price // tick) * tick
+            new_sell_price = self._align_to_tick(new_sell_price, tick)
             sell_qty = (sell_qty // step) * step  # Округляем до шага
 
             sell_notional = sell_qty * new_sell_price
@@ -1200,7 +1206,7 @@ class TradingBot:
                         )
                         break
 
-                    level_price = (current_buy_price // tick) * tick
+                    level_price = self._align_to_tick(current_buy_price, tick)
 
                     # Проверяем что level_price больше 0
                     if level_price <= 0 or level_price < tick:
@@ -1343,7 +1349,7 @@ class TradingBot:
 
             # Рассчитываем, сколько ордеров можно создать с учетом минимального объема
             # Используем минимальную цену для расчета (первая цена в сетке)
-            first_price = (current_sell_price // tick) * tick
+            first_price = self._align_to_tick(current_sell_price, tick)
             if first_price <= 0:
                 log.warning(f"First SELL price is zero or negative: {first_price}, cannot create SELL grid")
                 return 0
@@ -1375,7 +1381,7 @@ class TradingBot:
 
             created_count = 0
             for i in range(orders_to_create):
-                level_price = (current_sell_price // tick) * tick
+                level_price = self._align_to_tick(current_sell_price, tick)
 
                 if level_price <= 0:
                     log.warning(f"SELL level_price is zero or negative: {level_price}, skipping")
@@ -1464,7 +1470,7 @@ class TradingBot:
             current_buy_price = start_buy_price
 
             for i in range(buy_count):
-                level_price = (current_buy_price // tick) * tick
+                level_price = self._align_to_tick(current_buy_price, tick)
 
                 current_balance = await self.ex.balance(self.quote_asset_name)
                 if current_balance < self.buy_order_value:

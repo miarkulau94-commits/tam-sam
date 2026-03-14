@@ -634,8 +634,8 @@ class TestTradingCycleIntegration:
             assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 61
 
     @pytest.mark.asyncio
-    async def test_create_buy_after_sell_price_aligned_to_tick(self, temp_dirs, mock_exchange):
-        """При шаге 1.5% и sell_price=1.46: new_buy = 1.46*0.985 = 1.4381, выравнивание по tick вниз → 1.43."""
+    async def test_create_buy_after_sell_price_rounds_to_nearest_tick(self, temp_dirs, mock_exchange):
+        """При шаге 1.5% и sell_price=1.46: new_buy = 1.46*0.985 = 1.4381, до ближайшего тика → 1.44."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_nearest_tick")
         os.makedirs(trades_dir, exist_ok=True)
@@ -669,12 +669,12 @@ class TestTradingCycleIntegration:
                 Order(f"sell_{j}", "SELL", Decimal("1.5") + Decimal(j) * Decimal("0.02"), Decimal("7"), status="open")
                 for j in range(4)
             ]
-            # 1.46 * (1 - 0.015) = 1.4381; (// tick) * tick = 1.43
+            # 1.46 * (1 - 0.015) = 1.4381; до ближайшего тика 0.01 = 1.44
             result = await bot.create_buy_after_sell(Decimal("1.46"))
             assert result is True
             mock_exchange.place_limit.assert_called_once()
             placed_price = mock_exchange.place_limit.call_args[0][3]
-            assert placed_price == Decimal("1.43")
+            assert placed_price == Decimal("1.44")
 
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_allows_62_63_64_by_open_sell_count(self, temp_dirs, mock_exchange):
@@ -879,7 +879,7 @@ class TestPyramidingFallback:
             bot.grid_step_pct = Decimal("0.015")  # 1.5%
             bot.buy_order_value = Decimal("50")
             bot.profit_bank = Decimal("50")
-            # lowest=1.47 -> следующий уровень 1.47*0.985=1.44
+            # lowest=1.47 -> следующий уровень 1.47*0.985=1.44795 → до ближайшего тика 1.45
             bot.orders = [
                 Order("a", "BUY", Decimal("1.50"), Decimal("10"), status="open"),
                 Order("b", "BUY", Decimal("1.47"), Decimal("10"), status="open"),
@@ -887,7 +887,7 @@ class TestPyramidingFallback:
             await bot.check_pyramiding()
         mock_exchange.place_limit.assert_called_once()
         placed_price = mock_exchange.place_limit.call_args[0][3]
-        assert placed_price == Decimal("1.44"), "Следующий уровень сетки 1.47 - 1.5% = 1.44"
+        assert placed_price == Decimal("1.45"), "Следующий уровень 1.47*0.985 → до ближайшего тика 1.45"
 
     @pytest.mark.asyncio
     async def test_pyramiding_uses_fallback_075_when_main_price_occupied(self, temp_dirs, mock_exchange):
@@ -908,7 +908,7 @@ class TestPyramidingFallback:
             bot.grid_step_pct = Decimal("0.0075")  # 0.75%
             bot.buy_order_value = Decimal("50")
             bot.profit_bank = Decimal("50")
-            # lowest=1.98 -> следующий уровень 1.98*0.9925=1.96
+            # lowest=1.98 -> следующий уровень 1.98*0.9925=1.96515 → до ближайшего тика 1.97
             bot.orders = [
                 Order("a", "BUY", Decimal("2.00"), Decimal("10"), status="open"),
                 Order("b", "BUY", Decimal("1.98"), Decimal("10"), status="open"),
@@ -916,7 +916,7 @@ class TestPyramidingFallback:
             await bot.check_pyramiding()
         mock_exchange.place_limit.assert_called_once()
         placed_price = mock_exchange.place_limit.call_args[0][3]
-        assert placed_price == Decimal("1.96"), "Следующий уровень сетки 1.98 - 0.75% = 1.96"
+        assert placed_price == Decimal("1.97"), "Следующий уровень 1.98*0.9925 → до ближайшего тика 1.97"
 
     @pytest.mark.asyncio
     async def test_pyramiding_skips_when_both_main_and_fallback_occupied(self, temp_dirs, mock_exchange):
@@ -937,7 +937,7 @@ class TestPyramidingFallback:
             bot.grid_step_pct = Decimal("0.015")
             bot.buy_order_value = Decimal("50")
             bot.profit_bank = Decimal("50")
-            # [1.50, 1.47, 1.48] -> lowest=1.47, следующий уровень 1.44 (свободен) — один ордер по 1.44
+            # [1.50, 1.47, 1.48] -> lowest=1.47, следующий уровень 1.47*0.985→1.45 (свободен) — один ордер по 1.45
             bot.orders = [
                 Order("lowest", "BUY", Decimal("1.50"), Decimal("10"), status="open"),
                 Order("main_occupied", "BUY", Decimal("1.47"), Decimal("10"), status="open"),
@@ -946,7 +946,7 @@ class TestPyramidingFallback:
             await bot.check_pyramiding()
         mock_exchange.place_limit.assert_called_once()
         placed_price = mock_exchange.place_limit.call_args[0][3]
-        assert placed_price == Decimal("1.44"), "Следующий уровень ниже 1.47 — 1.44"
+        assert placed_price == Decimal("1.45"), "Следующий уровень ниже 1.47 → до ближайшего тика 1.45"
 
 
 class TestTradingCycleIntegrationContinued:

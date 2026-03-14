@@ -659,11 +659,43 @@ class TelegramBotManager:
 
         # Получаем состояние для настройки символа (в потоке)
         state = await asyncio.to_thread(self.persistence.load_state, user_id)
-
-        # Проверяем ключи и получаем баланс (синхронный HTTP — в потоке)
-        await _safe_edit_message(query, "🔄 Проверка API ключей...")
-
         saved_symbol = (state.get("symbol") if state else None) or config.SYMBOL
+
+        # Если бота нет в памяти (например после Стоп или перезапуска) — создаём для проверки ордеров на бирже
+        if not bot:
+            notifier = _make_telegram_notifier(self.app, user_id)
+            bot = await asyncio.to_thread(
+                _create_trading_bot, user_id, api_key, secret, notifier, saved_symbol
+            )
+            self.user_bots[user_id] = bot
+            self.uid_bots[uid] = user_id
+
+        # Проверяем, есть ли на бирже открытые ордера — если да, подхватываем сетку и запускаем (без перехода в настройки)
+        await _safe_edit_message(query, "🔄 Проверка ордеров на бирже...")
+        try:
+            exchange_orders = await bot.ex.open_orders(bot.symbol)
+            if exchange_orders and len(exchange_orders) > 0:
+                await asyncio.to_thread(bot.load_state)
+                await bot.sync_orders_from_exchange()
+                bot.state = BotState.INITIALIZING
+                asyncio.create_task(bot.main_loop())
+                log.info(f"[START_BOT] Resumed with {len(exchange_orders)} existing orders for user {user_id}")
+                open_buy = len([o for o in bot.orders if o.side == "BUY" and o.status == "open"])
+                open_sell = len([o for o in bot.orders if o.side == "SELL" and o.status == "open"])
+                await _safe_edit_message(
+                    query,
+                    f"✅ **Бот запущен с существующей сеткой!**\n\n"
+                    f"🟢 BUY: {open_buy} ордеров\n"
+                    f"🔴 SELL: {open_sell} ордеров\n\n"
+                    f"Бот работает в автоматическом режиме.",
+                    reply_markup=self._get_main_menu_keyboard(),
+                )
+                return
+        except Exception as e:
+            log.warning(f"[START_BOT] Could not resume from exchange orders: {e}")
+
+        # На бирже нет ордеров — показываем баланс и настройки (пользователь может построить сетку)
+        await _safe_edit_message(query, "🔄 Проверка API ключей...")
 
         def _check_keys_and_balance():
             ex = BingXSpot(api_key, secret)
@@ -710,9 +742,6 @@ class TelegramBotManager:
             )
 
             await _safe_edit_message(query, balance_message, parse_mode="Markdown", reply_markup=keyboard)
-
-            # Сохраняем состояние "готов к настройке" (ключи проверены, баланс показан)
-            # Теперь пользователь должен выбрать настройки и только потом построить сетку
 
         except Exception as e:
             log.error(f"Error checking API keys for user {user_id}: {e}", exc_info=True)
@@ -783,6 +812,15 @@ class TelegramBotManager:
         bot.total_executed_sells = 0
         if getattr(bot, "statistics", None):
             await asyncio.to_thread(bot.statistics.clear_all)
+
+        # Сброс Profit Bank и базы для прибыли: после Стоп при следующем запуске показываем 0
+        try:
+            price = await bot.get_current_price()
+            total_equity = await bot.get_total_equity(price)
+            bot.initial_equity = total_equity
+            bot.profit_bank = Decimal("0")
+        except Exception as e:
+            log.warning(f"[STOP_BOT] Could not set initial_equity/profit_bank: {e}")
 
         # Сохраняем состояние перед удалением (в потоке)
         await asyncio.to_thread(bot.save_state)

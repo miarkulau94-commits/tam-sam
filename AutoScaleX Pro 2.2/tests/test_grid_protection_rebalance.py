@@ -70,14 +70,17 @@ class TestGridProtectionCreateBuyAtBottom:
             Order("b1", "BUY", Decimal("100"), Decimal("0.1"), status="open"),
         ]
         bot.ex = MagicMock()
-        bot.ex.symbol_info.return_value = {
-            "stepSize": Decimal("0.0001"),
-            "tickSize": Decimal("0.01"),
-            "minQty": Decimal("0.0001"),
-            "minNotional": Decimal("0"),
-        }
+        bot.ex.symbol_info = AsyncMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("0.0001"),
+                "minNotional": Decimal("0"),
+            }
+        )
         bot.ex.available_balance = AsyncMock(return_value=Decimal("1000"))
         bot.ex.balance = AsyncMock(return_value=Decimal("1000"))
+        bot.ex.place_limit = AsyncMock(return_value={"orderId": "new_1"})
         bot.get_required_notional = MagicMock(return_value=Decimal("0"))
         bot.get_max_buy_orders = MagicMock(return_value=60)
         return bot
@@ -88,6 +91,17 @@ class TestGridProtectionCreateBuyAtBottom:
         n = await grid_protection.create_buy_orders_at_bottom(bot_mock, Decimal("100"))
         assert n == 0
         bot_mock.ex.place_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_buy_at_bottom_places_first_order_at_multiplicative_step(self, bot_mock):
+        """Первый добавленный BUY внизу на ~1.5% ниже минимального существующего BUY (мультипликативный шаг)."""
+        bot_mock.ex.place_limit = AsyncMock(return_value={"orderId": "new_1"})
+        n = await grid_protection.create_buy_orders_at_bottom(bot_mock, Decimal("100"))
+        assert n >= 1
+        first_call = bot_mock.ex.place_limit.call_args_list[0]
+        placed_price = first_call[0][3]
+        # Минимальный BUY в bot_mock = 100, шаг 1.5% → первый новый уровень 100 * 0.985 = 98.5
+        assert placed_price == Decimal("98.5")
 
 
 class TestRebalanceCheck:

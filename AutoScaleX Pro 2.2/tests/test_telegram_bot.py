@@ -21,6 +21,7 @@ try:
         _should_send_error_to_user,
         TelegramBotManager,
     )
+    from trading_bot import BotState
 except ImportError:
     ReferralSystem = None
     _is_error_notification = None
@@ -28,6 +29,7 @@ except ImportError:
     _is_success_or_info = None
     _should_send_error_to_user = None
     TelegramBotManager = None
+    BotState = None
 
 pytestmark = pytest.mark.skipif(
     _is_error_notification is None or _safe_edit_message is None,
@@ -678,3 +680,122 @@ class TestHandleBalance:
         msg = safe_edit.call_args[0][1]
         assert "Profit Bank: `12.34" in msg
         assert "для пирамидинга" in msg
+
+
+@pytest.mark.asyncio
+class TestHandleStartBotResumeAndBalance:
+    """Тесты handle_start_bot: подхват существующей сетки при наличии ордеров на бирже; баланс/настройки при отсутствии."""
+
+    async def test_handle_start_bot_resumes_when_exchange_has_orders(self):
+        """При нажатии Старт и наличии ордеров на бирже бот подхватывает сетку и показывает «Бот запущен с существующей сеткой»."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.state = BotState.STOPPED
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.orders = []
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.open_orders = AsyncMock(return_value=[
+            {"orderId": "o1", "side": "BUY", "price": "1.17"},
+            {"orderId": "o2", "side": "BUY", "price": "1.15"},
+        ])
+        mock_bot.load_state = MagicMock()
+        async def _sync_add_orders():
+            mock_bot.orders.extend([
+                MagicMock(side="BUY", status="open"),
+                MagicMock(side="BUY", status="open"),
+            ])
+        mock_bot.sync_orders_from_exchange = AsyncMock(side_effect=_sync_add_orders)
+
+        def run_in_thread(fn, *args):
+            return fn(*args) if args else fn()
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch.object(mgr, "_load_api_keys_for_user", return_value=("key", "secret")):
+                    with patch.object(mgr.persistence, "load_state", return_value={"symbol": "DOT-USDT"}):
+                        with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=run_in_thread):
+                            with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                                with patch("telegram_bot.asyncio.create_task", new_callable=MagicMock) as create_task:
+                                    await mgr.handle_start_bot(query, 100)
+
+        mock_bot.ex.open_orders.assert_called_once()
+        mock_bot.sync_orders_from_exchange.assert_called_once()
+        create_task.assert_called_once()
+        assert mock_bot.state == BotState.INITIALIZING
+        msg = safe_edit.call_args[0][1]
+        assert "Бот запущен с существующей сеткой" in msg or "существующей сеткой" in msg
+
+    async def test_handle_start_bot_shows_balance_when_no_orders_on_exchange(self):
+        """При нажатии Старт и отсутствии ордеров на бирже показываются баланс и настройки (не подхват)."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.state = BotState.STOPPED
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.open_orders = AsyncMock(return_value=[])
+
+        def run_in_thread(fn, *args):
+            return fn(*args) if args else fn()
+
+        mock_bingx = MagicMock()
+        mock_bingx.symbol_info = MagicMock()
+        mock_bingx.balance = MagicMock(side_effect=[Decimal("500"), Decimal("100")])
+        mock_bingx.price = MagicMock(return_value=Decimal("1.44"))
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch.object(mgr, "_load_api_keys_for_user", return_value=("key", "secret")):
+                    with patch.object(mgr.persistence, "load_state", return_value={"symbol": "DOT-USDT"}):
+                        with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=run_in_thread):
+                            with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                                with patch("telegram_bot.BingXSpot", return_value=mock_bingx):
+                                    await mgr.handle_start_bot(query, 100)
+
+        mock_bot.ex.open_orders.assert_called_once()
+        msg = safe_edit.call_args[0][1]
+        assert "API ключи проверены" in msg or "Баланс" in msg or "Итого" in msg
+
+
+@pytest.mark.asyncio
+class TestHandleStopBotResetProfitBank:
+    """Тесты handle_stop_bot: сброс profit_bank и initial_equity при остановке."""
+
+    async def test_handle_stop_bot_resets_profit_bank_and_initial_equity(self):
+        """При нажатии Стоп выставляются profit_bank=0 и initial_equity=total_equity, затем save_state."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        mock_bot = MagicMock()
+        mock_bot.state = BotState.TRADING
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.profit_bank = Decimal("15.50")
+        mock_bot.initial_equity = Decimal("600")
+        mock_bot.telegram_notifier = AsyncMock()
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.cancel_all = AsyncMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("1.44"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("1000"))
+        mock_bot.save_state = MagicMock()
+        mock_bot.statistics = MagicMock()
+        mock_bot.statistics.clear_all = MagicMock()
+
+        def run_in_thread(fn, *args):
+            return fn(*args) if args else fn()
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=run_in_thread):
+                    await mgr.handle_stop_bot(query, 100)
+
+        mock_bot.get_current_price.assert_called_once()
+        mock_bot.get_total_equity.assert_called_once()
+        assert mock_bot.profit_bank == Decimal("0")
+        assert mock_bot.initial_equity == Decimal("1000")
+        mock_bot.save_state.assert_called_once()

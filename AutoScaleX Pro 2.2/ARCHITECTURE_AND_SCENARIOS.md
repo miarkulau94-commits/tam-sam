@@ -4,6 +4,8 @@
 
 Подробности по шагам и формулам — в `BOT_LOGIC.md`, `SELL_REBALANCING.md`, `GRID_PROTECTION.md`, `ORDER_EXECUTION_LOGIC.md`.
 
+**Шаг сетки:** везде мультипликативный (~1.5% или 0.75% между уровнями). После исполнения BUY создаётся только SELL; после исполнения SELL — BUY снова на том же уровне (см. `ORDER_EXECUTION_LOGIC.md`, `BOT_LOGIC.md` §2.5).
+
 ---
 
 ## 1. Архитектура

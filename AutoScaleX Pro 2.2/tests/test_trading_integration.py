@@ -719,7 +719,7 @@ class TestTradingCycleIntegration:
 
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_fallback_step_when_primary_price_occupied(self, temp_dirs, mock_exchange):
-        """При шаге 1.5%: если на основной цене (sell - 1.5%) уже есть BUY, выставляем BUY по fallback (sell - 1%)."""
+        """При шаге 1.5%: мультипликативный шаг 1.57*0.985=1.54 занят — fallback 1% даёт 1.57*0.99=1.55."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_fallback")
         os.makedirs(trades_dir, exist_ok=True)
@@ -733,8 +733,6 @@ class TestTradingCycleIntegration:
             "minNotional": Decimal("0"),
             "status": "TRADING",
         }
-        # Синхронный мок: BingXSpotAsync вызывает методы через asyncio.to_thread();
-        # AsyncMock в потоке возвращает корутину, которую никто не await'ит → RuntimeWarning.
         mock_exchange.invalidate_balance_cache = MagicMock(return_value=None)
         with (
             patch("trading_bot.config.STATE_DIR", state_dir),
@@ -746,9 +744,7 @@ class TestTradingCycleIntegration:
             patch("asyncio.sleep", AsyncMock()),
         ):
             bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
-            bot.grid_step_pct = Decimal("0.015")  # 1.5%
-            # sell_price=1.57 -> primary BUY price = 1.57*0.985 = 1.54645. Ставим BUY на 1.54 (в пределах tick 0.01)
-            # fallback = 1.57*0.99 = 1.5543 -> по tick 1.55, на 1.55 BUY нет — должен выставиться
+            bot.grid_step_pct = Decimal("0.015")  # 1.5%: primary 1.54 занят → fallback 1% → 1.55
             bot.orders = [
                 Order("buy_occupied", "BUY", Decimal("1.54"), Decimal("6.5"), status="open"),
             ]
@@ -757,15 +753,14 @@ class TestTradingCycleIntegration:
             assert result is True
             mock_exchange.place_limit.assert_called_once()
             call_kwargs = mock_exchange.place_limit.call_args
-            assert call_kwargs[0][1] == "BUY"  # side
-            # Цена должна быть fallback, округлённая по tick: 1.5543 -> 1.55
+            assert call_kwargs[0][1] == "BUY"
             placed_price = call_kwargs[0][3]
             assert placed_price == Decimal("1.55")
             assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 2
 
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_fallback_step_075_when_primary_occupied(self, temp_dirs, mock_exchange):
-        """При шаге 0.75%: если на основной цене (sell - 0.75%) уже есть BUY, выставляем BUY по fallback (sell - 0.5%)."""
+        """При шаге 0.75%: мультипликативный 2.0*0.9925=1.98 занят — fallback 0.5% даёт 2.0*0.995=1.99."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_fallback075")
         os.makedirs(trades_dir, exist_ok=True)
@@ -790,9 +785,7 @@ class TestTradingCycleIntegration:
             patch("asyncio.sleep", AsyncMock()),
         ):
             bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
-            bot.grid_step_pct = Decimal("0.0075")  # 0.75%
-            # sell_price=2.0 -> primary = 2.0*0.9925 = 1.985, fallback = 2.0*0.995 = 1.99
-            # Занят уровень 1.98 (в пределах tick от 1.985), на 1.99 BUY нет
+            bot.grid_step_pct = Decimal("0.0075")  # 0.75%: primary 1.98 занят → fallback 0.5% → 1.99
             bot.orders = [
                 Order("buy_occupied", "BUY", Decimal("1.98"), Decimal("5"), status="open"),
             ]
@@ -803,6 +796,40 @@ class TestTradingCycleIntegration:
             placed_price = mock_exchange.place_limit.call_args[0][3]
             assert placed_price == Decimal("1.99")
             assert len([o for o in bot.orders if o.side == "BUY" and o.status == "open"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_create_buy_after_buy_places_at_multiplicative_step(self, temp_dirs, mock_exchange):
+        """После исполнения BUY новый BUY ставится на ~1.5% ниже (мультипликативный шаг)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_buy_after_buy")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.return_value = Decimal("1000")
+        mock_exchange.place_limit = AsyncMock(return_value={"orderId": "new_buy_1"})
+        mock_exchange.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="DOT-USDT")
+            bot.grid_step_pct = Decimal("0.015")
+            bot.buy_order_value = Decimal("20")
+            bot.orders = []  # нет BUY на 1.97 — можно ставить
+            await bot.create_buy_after_buy(Decimal("2.0"))
+        mock_exchange.place_limit.assert_called_once()
+        placed_price = mock_exchange.place_limit.call_args[0][3]
+        # 2.0 * (1 - 0.015) = 1.97, по tick 0.01 → 1.97
+        assert placed_price == Decimal("1.97")
 
 
 class TestPyramidingFallback:
@@ -1571,3 +1598,104 @@ class TestFullCycleIntegration:
             mock_exchange.place_market.assert_called_once()
             bot.rebuild_buy_grid_from_price.assert_called_once()
             bot.create_sell_grid_only.assert_called_once()
+
+
+@pytest.mark.asyncio
+class TestGridMultiplicativeStep:
+    """Тесты мультипликативного шага сетки ~1.5%: уровни ровно в процентах (BUY↔SELL вперёд-назад)."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.fixture
+    def mock_exchange(self):
+        ex = MagicMock()
+        ex.balance = AsyncMock(return_value=Decimal("10000"))
+        ex.available_balance = AsyncMock(return_value=Decimal("10000"))
+        ex.open_orders = AsyncMock(return_value=[])
+        ex.symbol_info = MagicMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("0.0001"),
+                "minNotional": Decimal("0"),
+                "status": "TRADING",
+            }
+        )
+        ex.circuit_breaker = MagicMock()
+        ex.circuit_breaker.state = MagicMock()
+        return ex
+
+    async def test_create_grid_do_buy_orders_multiplicative_step(self, temp_dirs, mock_exchange):
+        """BUY ордера при создании сетки: каждый следующий уровень на ~1.5% ниже (мультипликативный шаг)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_mult_buy")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.place_limit = AsyncMock(return_value={"orderId": "buy_1"})
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(1, "key", "secret", symbol="DOT-USDT")
+            bot.ex = mock_exchange
+            bot.grid_step_pct = Decimal("0.015")  # 1.5%
+            bot.buy_order_value = Decimal("20")
+            bot.profit_bank = Decimal("0")
+            price = Decimal("1.20")
+            step = Decimal("0.0001")
+            tick = Decimal("0.01")
+            min_qty = Decimal("0.0001")
+            min_notional = Decimal("0")
+            with patch.object(bot, "calculate_active_buy_orders_count", AsyncMock(return_value=5)):
+                created = await bot._create_grid_do_buy_orders(price, step, tick, min_qty, min_notional)
+        assert created == 5
+        buy_calls = [c for c in mock_exchange.place_limit.call_args_list if c[0][1] == "BUY"]
+        assert len(buy_calls) == 5
+        prices = sorted([c[0][3] for c in buy_calls], reverse=True)
+        # Каждый уровень ~1.5% ниже предыдущего (допуск из-за округления по tick)
+        for i in range(len(prices) - 1):
+            pct_step = (prices[i] - prices[i + 1]) / prices[i]
+            assert 0.005 <= pct_step <= 0.025, f"Шаг между уровнями должен быть ~1.5%: {pct_step:.4f}"
+
+    async def test_create_grid_do_sell_orders_multiplicative_step(self, temp_dirs, mock_exchange):
+        """SELL ордера при создании сетки: каждый следующий уровень на ~1.5% выше (мультипликативный шаг)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_mult_sell")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.place_limit = AsyncMock(return_value={"orderId": "sell_1"})
+        mock_exchange.balance = AsyncMock(side_effect=[Decimal("10000"), Decimal("100")])
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(1, "key", "secret", symbol="DOT-USDT")
+            bot.ex = mock_exchange
+            bot.orders = []
+            bot.grid_step_pct = Decimal("0.015")
+            price = Decimal("1.20")
+            step = Decimal("0.0001")
+            tick = Decimal("0.01")
+            min_qty = Decimal("0.0001")
+            min_notional = Decimal("0")
+            with patch("trading_bot.config.SELL_ORDERS_COUNT", 5):
+                created = await bot._create_grid_do_sell_orders(price, step, tick, min_qty, min_notional)
+        assert created == 5
+        sell_calls = [c for c in mock_exchange.place_limit.call_args_list if c[0][1] == "SELL"]
+        assert len(sell_calls) == 5
+        prices = sorted([c[0][3] for c in sell_calls])
+        for i in range(len(prices) - 1):
+            pct_step = (prices[i + 1] - prices[i]) / prices[i]
+            assert 0.005 <= pct_step <= 0.025, f"Шаг между уровнями должен быть ~1.5%: {pct_step:.4f}"

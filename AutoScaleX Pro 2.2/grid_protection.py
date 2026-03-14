@@ -120,7 +120,6 @@ async def create_buy_orders_at_bottom(bot: "TradingBot", current_price: Decimal)
 
         created_count = 0
         current_buy_price = start_price
-
         for i in range(max_orders):
             current_open_buy = len([o for o in bot.orders if o.side == "BUY" and o.status == "open"])
             if current_open_buy >= max_allowed_buy:
@@ -139,6 +138,12 @@ async def create_buy_orders_at_bottom(bot: "TradingBot", current_price: Decimal)
                 log.warning(f"[CREATE_BUY_AT_BOTTOM] Price too low: {level_price}, stopping")
                 break
 
+            existing_at_level = any(o.side == "BUY" and abs(o.price - level_price) < tick and o.status == "open" for o in bot.orders)
+            if existing_at_level:
+                log.debug(f"[CREATE_BUY_AT_BOTTOM] Skip level {level_price:.8f} (already has BUY)")
+                current_buy_price = current_buy_price * (Decimal("1") - bot.grid_step_pct)
+                continue
+
             qty = (bot.buy_order_value / level_price).quantize(step, rounding=ROUND_DOWN)
             notional = qty * level_price
             required_notional = bot.get_required_notional(min_notional)
@@ -152,7 +157,7 @@ async def create_buy_orders_at_bottom(bot: "TradingBot", current_price: Decimal)
                         )
                         bot.orders.append(order)
                         created_count += 1
-                        log.info(f"🟩 [CREATE_BUY_AT_BOTTOM] ✅ Created BUY order {i + 1} at {level_price:.8f}, qty={qty:.8f}")
+                        log.info(f"🟩 [CREATE_BUY_AT_BOTTOM] ✅ Created BUY order at {level_price:.8f}, qty={qty:.8f}")
                         await asyncio.sleep(0.2)
                 except Exception as e:
                     log.warning(f"[CREATE_BUY_AT_BOTTOM] Failed to place BUY order at {level_price}: {e}")

@@ -451,7 +451,7 @@ class TradingBot:
     async def _create_grid_do_sell_orders(
         self, price: Decimal, step: Decimal, tick: Decimal, min_qty: Decimal, min_notional: Decimal
     ) -> int:
-        """Шаг 2: создать SELL ордера. Возвращает количество созданных."""
+        """Шаг 2: создать SELL ордера. Мультипликативный шаг ~1.5% между уровнями (ровно в процентах)."""
         current_base_balance = await self.ex.balance(self.base_asset_name)
         if current_base_balance <= 0:
             return 0
@@ -494,7 +494,7 @@ class TradingBot:
     async def _create_grid_do_buy_orders(
         self, price: Decimal, step: Decimal, tick: Decimal, min_qty: Decimal, min_notional: Decimal
     ) -> int:
-        """Шаг 3: создать BUY ордера. Возвращает количество созданных."""
+        """Шаг 3: создать BUY ордера. Мультипликативный шаг ~1.5% между уровнями (ровно в процентах)."""
         buy_count = await self.calculate_active_buy_orders_count()
         if buy_count <= 0:
             raise ValueError(f"Количество BUY ордеров должно быть больше 0: {buy_count}")
@@ -918,25 +918,21 @@ class TradingBot:
                 f"Balance check passed: available={quote_available:.2f}, total={quote_total:.2f}, open BUY={len(open_buy_orders)}, open SELL={len(open_sell_orders)}, max BUY allowed after SELL={max_allowed_after_sell} (grid_step={self.grid_step_pct:.4f})"
             )
 
-            # Рассчитываем цену нового BUY ордера: на месте исполненного SELL минус шаг сетки
-            # Это поддерживает сетку - после продажи создаем ордер покупки ниже
-            new_buy_price = sell_price * (Decimal("1") - self.grid_step_pct)
-            log.info(f"Calculated new BUY price after SELL: {sell_price:.8f} * (1 - {self.grid_step_pct:.6f}) = {new_buy_price:.8f}")
-
-            # Проверяем, не создан ли уже ордер на этой цене
+            # Новый BUY на ~1.5% ниже SELL (мультипликативный шаг — ровные уровни в процентах)
             info = await self.ex.symbol_info(self.symbol)
             tick = info["tickSize"]
-            existing_buy = any(o.side == "BUY" and abs(o.price - new_buy_price) < tick and o.status == "open" for o in self.orders)
+            new_buy_price = sell_price * (Decimal("1") - self.grid_step_pct)
+            log.info(f"Calculated new BUY price after SELL (~1.5%% step): {sell_price:.8f} * (1 - {self.grid_step_pct:.4f}) = {new_buy_price:.8f}")
 
+            existing_buy = any(o.side == "BUY" and abs(o.price - new_buy_price) < tick and o.status == "open" for o in self.orders)
             if existing_buy:
-                # Fallback: при занятой цене пробуем меньший шаг (1% при шаге 1.5%, 0.5% при 0.75%)
                 fallback_step_pct = None
                 if self.grid_step_pct is not None:
                     step_float = float(self.grid_step_pct)
                     if abs(step_float - 0.015) < 0.0001:
-                        fallback_step_pct = Decimal("0.01")  # 1%
+                        fallback_step_pct = Decimal("0.01")
                     elif abs(step_float - 0.0075) < 0.0001:
-                        fallback_step_pct = Decimal("0.005")  # 0.5%
+                        fallback_step_pct = Decimal("0.005")
                 if fallback_step_pct is not None:
                     fallback_price = sell_price * (Decimal("1") - fallback_step_pct)
                     existing_at_fallback = any(
@@ -944,7 +940,7 @@ class TradingBot:
                     )
                     if not existing_at_fallback:
                         log.info(
-                            f"[CREATE_BUY_AFTER_SELL] BUY already at {new_buy_price:.8f}, using fallback step {fallback_step_pct}: price={fallback_price:.8f}"
+                            f"[CREATE_BUY_AFTER_SELL] BUY already at {new_buy_price:.8f}, using fallback step: {fallback_price:.8f}"
                         )
                         new_buy_price = fallback_price
                         existing_buy = False
@@ -952,15 +948,10 @@ class TradingBot:
                     log.warning(f"[CREATE_BUY_AFTER_SELL] SKIPPED: BUY order already exists at price {new_buy_price:.8f}")
                     return False
 
-            # Получаем информацию о символе
             step = info["stepSize"]
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
-
-            # Рассчитываем количество и цену (округление цены до ближайшего тика, чтобы шаг был ближе к grid_step_pct)
-            if tick > 0:
-                new_buy_price = (new_buy_price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
-            else:
+            if tick and tick > 0:
                 new_buy_price = (new_buy_price // tick) * tick
             qty = (self.buy_order_value / new_buy_price).quantize(step, rounding=ROUND_DOWN)
             buy_notional = qty * new_buy_price
@@ -1042,25 +1033,20 @@ class TradingBot:
 
             log.info(f"Balance check passed: {quote_balance:.2f}, open BUY orders: {len(open_buy_orders)}, max: {max_buy_orders}")
 
-            # Рассчитываем цену нового BUY ордера: ниже исполненного на шаг сетки
-            new_buy_price = executed_buy_price * (Decimal("1") - self.grid_step_pct)
-            log.info(f"Calculated new BUY price: {executed_buy_price:.8f} * (1 - {self.grid_step_pct:.6f}) = {new_buy_price:.8f}")
-
-            # Проверяем, не создан ли уже ордер на этой цене
+            # Новый BUY на ~1.5% ниже исполненного (мультипликативный шаг)
             info = await self.ex.symbol_info(self.symbol)
             tick = info["tickSize"]
-            existing_buy = any(o.side == "BUY" and abs(o.price - new_buy_price) < tick and o.status == "open" for o in self.orders)
+            new_buy_price = executed_buy_price * (Decimal("1") - self.grid_step_pct)
+            log.info(f"Calculated new BUY price (~1.5%% step): {executed_buy_price:.8f} * (1 - {self.grid_step_pct:.4f}) = {new_buy_price:.8f}")
 
+            existing_buy = any(o.side == "BUY" and abs(o.price - new_buy_price) < tick and o.status == "open" for o in self.orders)
             if existing_buy:
                 log.warning(f"BUY order already exists at price {new_buy_price:.8f}, skipping creation")
                 return
 
-            # Получаем информацию о символе
             step = info["stepSize"]
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
-
-            # Рассчитываем количество и цену
             new_buy_price = (new_buy_price // tick) * tick
             qty = (self.buy_order_value / new_buy_price).quantize(step, rounding=ROUND_DOWN)
             buy_notional = qty * new_buy_price

@@ -813,7 +813,7 @@ class TelegramBotManager:
         if getattr(bot, "statistics", None):
             await asyncio.to_thread(bot.statistics.clear_all)
 
-        # Сброс Profit Bank и базы для прибыли: после Стоп при следующем запуске показываем 0
+        # Сброс Profit Bank и базы для прибыли: после Стоп при следующем запуске/новой монете не показываем старую прибыль
         try:
             price = await bot.get_current_price()
             total_equity = await bot.get_total_equity(price)
@@ -822,7 +822,7 @@ class TelegramBotManager:
         except Exception as e:
             log.warning(f"[STOP_BOT] Could not set initial_equity/profit_bank: {e}")
 
-        # Сохраняем состояние перед удалением (в потоке)
+        # Сохраняем состояние (и в user_data по UID), чтобы при выборе новой монеты и построении сетки не подтягивались старые данные
         await asyncio.to_thread(bot.save_state)
 
         # Удаляем бота из списков
@@ -850,8 +850,9 @@ class TelegramBotManager:
             return
 
         try:
-            # Подтягиваем состояние с диска, чтобы Profit Bank и initial_equity были актуальными
-            await asyncio.to_thread(bot.load_state)
+            # Подтягиваем состояние с диска (profit_bank, initial_equity и т.д.), не перезаписывая bot.state,
+            # чтобы открытие «Баланс» не останавливало работающий бот (файл мог содержать STOPPED из прошлой сессии)
+            await asyncio.to_thread(bot.load_state, True)  # skip_bot_state=True
 
             price = await bot.get_current_price()
             quote_balance = await bot.ex.balance(bot.quote_asset_name)
@@ -1187,7 +1188,12 @@ class TelegramBotManager:
                 log.warning(f"[BUILD_GRID] Error checking for existing orders: {e}, will create new grid")
 
             # Нет существующих ордеров - создаем новую сетку
-            log.info("[BUILD_GRID] No existing orders found, creating new grid")
+            # Сбрасываем прибыль и профит-банк, чтобы при смене монеты не тянуть старые данные
+            bot.profit_bank = Decimal("0")
+            bot.initial_equity = Decimal("0")
+            bot.total_executed_buys = 0
+            bot.total_executed_sells = 0
+            log.info("[BUILD_GRID] No existing orders found, creating new grid (profit_bank/initial_equity reset)")
             await bot.create_grid()
 
             # Получаем количество созданных ордеров
@@ -1196,6 +1202,7 @@ class TelegramBotManager:
 
             # Запускаем основной цикл бота в фоне
             bot.state = BotState.TRADING
+            await asyncio.to_thread(bot.save_state)  # чтобы при открытии «Баланс» load_state не подменял state на старый STOPPED
             log.info(f"🚀 Starting main_loop for user {user_id}, state set to TRADING")
             asyncio.create_task(bot.main_loop())
             log.info(f"✅ main_loop task created for user {user_id}")

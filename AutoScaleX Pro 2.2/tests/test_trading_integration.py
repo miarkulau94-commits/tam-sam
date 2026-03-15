@@ -317,6 +317,38 @@ class TestTradingBotWithMockedExchange:
             bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
         assert bot._cancelled_buy_for_rebalance_prep is False
 
+    def test_load_state_skip_bot_state_true_does_not_overwrite_state(self, temp_dirs, mock_exchange):
+        """При load_state(skip_bot_state=True) состояние бота из файла не подставляется — работающий TRADING не сменяется на STOPPED."""
+        import json
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_skip_state")
+        os.makedirs(trades_dir, exist_ok=True)
+        state_file = os.path.join(state_dir, "user_12345.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "uid": "12345",
+                "symbol": "ETH-USDT",
+                "grid_step_pct": "0.0075",
+                "orders": [],
+                "buy_order_value": "50",
+                "bot_state": int(BotState.STOPPED),
+            }, f)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+        assert bot.state == BotState.STOPPED
+        bot.state = BotState.TRADING
+        bot.load_state(skip_bot_state=True)
+        assert bot.state == BotState.TRADING
+        bot.load_state(skip_bot_state=False)
+        assert bot.state == BotState.STOPPED
+
 
 class TestTradingCycleIntegration:
     """Интеграционные тесты полного торгового цикла (handle_buy_filled, handle_sell_filled, sync)."""

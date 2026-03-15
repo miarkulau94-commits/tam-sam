@@ -555,7 +555,7 @@ class TestHandleBalance:
                     with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
                         await mgr.handle_balance(query, 123)
 
-        mock_bot.load_state.assert_called_once()
+        mock_bot.load_state.assert_called_once_with(True)
         assert mock_bot.initial_equity == Decimal("1295.07")
         mock_bot.save_state.assert_called_once()
         safe_edit.assert_called_once()
@@ -594,7 +594,7 @@ class TestHandleBalance:
         assert "Profit Bank: `5.00" in msg
 
     async def test_balance_calls_load_state_before_building_message(self):
-        """Перед построением сообщения вызывается bot.load_state."""
+        """Перед построением сообщения вызывается bot.load_state(skip_bot_state=True), чтобы не останавливать работающий бот."""
         mgr = TelegramBotManager()
         query = AsyncMock()
 
@@ -617,7 +617,7 @@ class TestHandleBalance:
                     with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock):
                         await mgr.handle_balance(query, 789)
 
-        mock_bot.load_state.assert_called_once()
+        mock_bot.load_state.assert_called_once_with(True)
 
     async def test_balance_profit_bank_from_state_same_as_pyramiding(self):
         """Profit Bank в «Баланс» — то же значение из state, что используется для пирамидинга."""
@@ -680,6 +680,51 @@ class TestHandleBalance:
         msg = safe_edit.call_args[0][1]
         assert "Profit Bank: `12.34" in msg
         assert "для пирамидинга" in msg
+
+
+@pytest.mark.asyncio
+class TestHandleBuildGridResetsProfitWhenNewGrid:
+    """Тесты handle_build_grid: сброс profit_bank и счётчиков при построении новой сетки (смена монеты)."""
+
+    async def test_build_grid_resets_profit_bank_and_counters_when_creating_new_grid(self):
+        """При построении новой сетки (нет ордеров на бирже) profit_bank, initial_equity и счётчики сбрасываются."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        user_id = 508265586
+
+        mock_bot = MagicMock()
+        mock_bot.profit_bank = Decimal("10")
+        mock_bot.initial_equity = Decimal("100")
+        mock_bot.total_executed_buys = 5
+        mock_bot.total_executed_sells = 3
+        mock_bot.orders = []
+        mock_bot.symbol = "AVAX-USDT"
+        mock_bot.grid_step_pct = Decimal("0.015")
+        mock_bot.buy_order_value = Decimal("20")
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.open_orders = AsyncMock(return_value=[])
+        mock_bot.create_grid = AsyncMock()
+        mock_bot.save_state = MagicMock()
+
+        async def to_thread_impl(fn, *args):
+            return fn(*args)
+
+        with patch.object(mgr, "_get_user_uid", return_value="35176918"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=None):
+                with patch.object(mgr, "_load_api_keys_for_user", return_value=("key", "secret")):
+                    with patch.object(mgr.persistence, "load_state", return_value={"symbol": "AVAX-USDT", "grid_step_pct": "0.015", "buy_order_value": "20"}):
+                        with patch("telegram_bot._create_trading_bot", return_value=mock_bot):
+                            with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=to_thread_impl):
+                                with patch("telegram_bot.asyncio.create_task", new_callable=MagicMock):
+                                    await mgr.handle_build_grid(query, user_id)
+
+        assert mock_bot.profit_bank == Decimal("0")
+        assert mock_bot.initial_equity == Decimal("0")
+        assert mock_bot.total_executed_buys == 0
+        assert mock_bot.total_executed_sells == 0
+        mock_bot.create_grid.assert_called_once()
+        assert mock_bot.save_state.call_count >= 1
 
 
 @pytest.mark.asyncio

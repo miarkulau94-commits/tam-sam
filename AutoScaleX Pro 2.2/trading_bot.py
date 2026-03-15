@@ -103,8 +103,10 @@ class TradingBot:
         # Загружаем сохраненное состояние
         self.load_state()
 
-    def load_state(self) -> None:
-        """Загрузить сохраненное состояние"""
+    def load_state(self, skip_bot_state: bool = False) -> None:
+        """Загрузить сохраненное состояние.
+        skip_bot_state: если True, не перезаписывать self.state из файла (для отображения баланса без остановки работающего бота).
+        """
         try:
             state = self.persistence.load_state(self.user_id)
             if state:
@@ -210,7 +212,8 @@ class TradingBot:
                 self.orders = [Order.from_dict(o) for o in orders_data]
 
                 # Восстанавливаем состояние бота (TRADING/PAUSED/STOPPED) для авто-рестарта
-                if "bot_state" in state:
+                # Не перезаписываем state при skip_bot_state (напр. при открытии «Баланс»), чтобы не остановить работающий бот
+                if not skip_bot_state and "bot_state" in state:
                     try:
                         v = int(state["bot_state"])
                         if BotState.INITIALIZING.value <= v <= BotState.STOPPED.value:

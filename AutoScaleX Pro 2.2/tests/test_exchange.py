@@ -4,12 +4,13 @@ Unit tests for exchange — CircuitBreaker, rate limit retry.
 
 import os
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import exchange as exchange_mod
 from exchange import CircuitBreaker, CircuitState, get_api_metrics_last_minute, _get_global_rps_limiter
 
 
@@ -395,3 +396,495 @@ class TestGlobalRateLimiterAndMetrics:
         assert "errors" in m
         assert m["requests"] >= 0
         assert m["errors"] >= 0
+
+
+class TestCircuitBreakerHalfOpen:
+    """HALF_OPEN после таймаута OPEN и возврат в CLOSED."""
+
+    def test_closes_after_success_in_half_open(self):
+        cb = CircuitBreaker(failure_threshold=2, timeout=10, success_threshold=1)
+
+        def fail():
+            raise RuntimeError("fail")
+
+        for _ in range(2):
+            with pytest.raises(RuntimeError):
+                cb.call(fail)
+        assert cb.state == CircuitState.OPEN
+
+        # Сдвигаем «последний сбой» в прошлое, чтобы при фиксированном time перейти из OPEN в HALF_OPEN
+        cb.last_failure_time = 0.0
+        with patch.object(exchange_mod.time, "time", return_value=100.0):
+            assert cb.call(lambda: 42) == 42
+        assert cb.state == CircuitState.CLOSED
+
+
+class TestBingXSpotHttpVerbsAndHelpers:
+    """DELETE/POST в _request, place_market, cancel_order, кэш, is_symbol_trading."""
+
+    def test_request_delete_uses_sess_delete(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r = Mock()
+        r.raise_for_status = lambda: None
+        r.headers = {}
+        r.json = lambda: {"code": 0, "data": {"deleted": True}}
+        with patch.object(ex.sess, "delete", return_value=r):
+            with patch("exchange.time.sleep"):
+                out = ex._request("DELETE", "/openApi/test", {"id": "1"})
+        assert out == {"deleted": True}
+
+    def test_request_post_uses_sess_post(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        r = Mock()
+        r.raise_for_status = lambda: None
+        r.headers = {}
+        r.json = lambda: {"code": 0, "data": {"orderId": "post1"}}
+        with patch.object(ex.sess, "post", return_value=r):
+            with patch("exchange.time.sleep"):
+                out = ex._request("POST", "/openApi/spot/v1/trade/order", {"symbol": "BTC-USDT"})
+        assert out["orderId"] == "post1"
+
+    def test_place_market_bad_side(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        with pytest.raises(ValueError, match="Bad side"):
+            ex.place_market("BTC-USDT", "HOLD", Decimal("1"))
+
+    def test_place_market_returns_none_when_no_qty(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        assert ex.place_market("BTC-USDT", "SELL", Decimal("0"), None) is None
+
+    def test_place_market_sell_with_quantity(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        captured = {}
+
+        def capture_post(m, ep, p=None):
+            captured["payload"] = p
+            return {"orderId": "m1"}
+
+        ex._request = capture_post
+        r = ex.place_market("BTC-USDT", "SELL", Decimal("0.1"), None)
+        assert r["orderId"] == "m1"
+        assert "quantity" in captured["payload"]
+
+    def test_cancel_order_order_gone_returns_none(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+
+        def boom(*a, **k):
+            raise RuntimeError("Order does not exist on exchange")
+
+        ex._request = boom
+        assert ex.cancel_order("BTC-USDT", "999") is None
+
+    def test_price_second_call_uses_cache(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        n = {"c": 0}
+
+        def req(m, ep, p=None):
+            n["c"] += 1
+            return [{"lastPrice": "50.5"}]
+
+        ex._request = req
+        assert ex.price("ETH-USDT") == Decimal("50.5")
+        assert ex.price("ETH-USDT") == Decimal("50.5")
+        assert n["c"] == 1
+
+    def test_balance_zero_when_request_returns_none(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda *a, **k: None
+        assert ex.balance("USDT") == Decimal("0")
+
+    def test_price_raises_when_api_none_and_no_cache(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda *a, **k: None
+        with pytest.raises(RuntimeError, match="кэшированной цены|API"):
+            ex.price("BTC-USDT")
+
+    def test_invalidate_balance_cache_clears_all_when_asset_none(self):
+        from decimal import Decimal
+        import time as time_std
+
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._cache = {("balance", "USDT"): (Decimal("1"), time_std.time())}
+        ex.invalidate_balance_cache(None)
+        assert ("balance", "USDT") not in ex._cache
+
+    def test_is_symbol_trading_false_for_break_status(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        raw = {
+            "symbols": [
+                {
+                    "symbol": "ZBT-USDT",
+                    "status": 0,
+                    "filters": [
+                        {"filterType": "LOT_SIZE", "stepSize": "0.1", "minQty": "0.1"},
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "5"},
+                    ],
+                    "baseAsset": "ZBT",
+                    "quoteAsset": "USDT",
+                }
+            ]
+        }
+        ex._request = lambda m, e, p=None: raw if "symbols" in e else None
+        assert ex.is_symbol_trading("ZBT-USDT") is False
+
+    def test_close_stops_rate_limiter(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.close()
+        ex.rate_limiter._stop_event.is_set()
+
+
+class TestBingXSpotAsyncWrapper:
+    """BingXSpotAsync делегирует в sync-клиент."""
+
+    @pytest.mark.asyncio
+    async def test_place_market_async(self):
+        from decimal import Decimal
+        from exchange import BingXSpot, BingXSpotAsync
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda *a, **k: {"orderId": "async1"}
+        async_ex = BingXSpotAsync(ex)
+        r = await async_ex.place_market("ETH-USDT", "BUY", Decimal("0"), quote_order_qty=Decimal("25"))
+        assert r["orderId"] == "async1"
+
+    @pytest.mark.asyncio
+    async def test_get_order_async(self):
+        from exchange import BingXSpot, BingXSpotAsync
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda *a, **k: {"orderId": "q1", "status": "FILLED"}
+        async_ex = BingXSpotAsync(ex)
+        r = await async_ex.get_order("ETH-USDT", "q1")
+        assert r["status"] == "FILLED"
+
+
+class TestBingXSpotCancelAll:
+    """cancel_all: пропуск битых ордеров, отмена валидных, ошибки cancel_order."""
+
+    def test_cancel_all_skips_bad_side_or_type(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.open_orders = lambda symbol: [
+            {"side": "BUY", "type": "LIMIT", "orderId": "good"},
+            {"side": "WEIRD", "type": "LIMIT", "orderId": "skip1"},
+            {"side": "BUY", "type": "STOP", "orderId": "skip2"},
+        ]
+        ex.cancel_order = MagicMock(return_value={})
+        with patch("exchange.time.sleep"):
+            ex.cancel_all("ETH-USDT")
+        ex.cancel_order.assert_called_once_with("ETH-USDT", "good")
+
+    def test_cancel_all_processes_buy_and_sell(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.open_orders = lambda symbol: [
+            {"side": "BUY", "type": "LIMIT", "orderId": "a"},
+            {"side": "SELL", "type": "LIMIT", "orderId": "b"},
+        ]
+        ex.cancel_order = MagicMock(return_value={})
+        with patch("exchange.time.sleep"):
+            ex.cancel_all("ETH-USDT")
+        assert ex.cancel_order.call_count == 2
+
+    def test_cancel_all_swallows_order_not_exist(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.open_orders = lambda symbol: [{"side": "BUY", "type": "LIMIT", "orderId": "x"}]
+
+        def cancel(sym, oid):
+            raise RuntimeError("Order does not exist")
+
+        ex.cancel_order = cancel
+        with patch("exchange.time.sleep"):
+            ex.cancel_all("ETH-USDT")
+
+    def test_cancel_all_warns_on_other_cancel_failure(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.open_orders = lambda symbol: [{"side": "BUY", "type": "LIMIT", "orderId": "x"}]
+        ex.cancel_order = MagicMock(side_effect=RuntimeError("server error"))
+        with patch("exchange.time.sleep"):
+            ex.cancel_all("ETH-USDT")
+
+    def test_cancel_order_non_exist_message_raises_none(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("order not exist"))
+        assert ex.cancel_order("BTC-USDT", "1") is None
+
+    def test_cancel_order_other_error_reraises(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network down"))
+        with pytest.raises(RuntimeError, match="network"):
+            ex.cancel_order("BTC-USDT", "1")
+
+
+class TestBingXSpotValidateAndPlaceLimit:
+    """validate_order и place_limit."""
+
+    def _trading_info(self):
+        from decimal import Decimal
+
+        return {
+            "stepSize": Decimal("0.01"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.1"),
+            "minNotional": Decimal("5"),
+            "status": "TRADING",
+        }
+
+    def test_validate_order_rejects_non_positive_price(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: True
+        ex.symbol_info = lambda s: self._trading_info()
+        r = ex.validate_order("ETH-USDT", "BUY", Decimal("1"), Decimal("0"))
+        assert r["valid"] is False
+        assert any("Цена" in e for e in r["errors"])
+
+    def test_validate_order_rejects_qty_below_min(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: True
+        ex.symbol_info = lambda s: self._trading_info()
+        r = ex.validate_order("ETH-USDT", "BUY", Decimal("0.05"), Decimal("2000"))
+        assert r["valid"] is False
+        assert any("минимального" in e for e in r["errors"])
+
+    def test_validate_order_rejects_low_notional(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: True
+        info = dict(self._trading_info())
+        info["minNotional"] = Decimal("1000")
+        ex.symbol_info = lambda s: info
+        r = ex.validate_order("ETH-USDT", "BUY", Decimal("0.1"), Decimal("10"))
+        assert r["valid"] is False
+        assert any("Номинал" in e for e in r["errors"])
+
+    def test_validate_order_buy_low_quote_adds_warning(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: True
+        ex.symbol_info = lambda s: self._trading_info()
+        ex.balance = lambda asset: Decimal("1")
+        r = ex.validate_order("ETH-USDT", "BUY", Decimal("10"), Decimal("200"))
+        assert r["valid"] is True
+        assert any("Недостаточно баланса" in w for w in r["warnings"])
+
+    def test_validate_order_sell_low_base_adds_warning(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: True
+        ex.symbol_info = lambda s: self._trading_info()
+        ex.balance = lambda asset: Decimal("0.01") if asset == "ETH" else Decimal("10000")
+        r = ex.validate_order("ETH-USDT", "SELL", Decimal("5"), Decimal("200"))
+        assert r["valid"] is True
+        assert any("базовой валюты" in w for w in r["warnings"])
+
+    def test_validate_order_symbol_not_trading(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: False
+        ex.symbol_info = lambda s: {"status": "BREAK"}
+        r = ex.validate_order("X-USDT", "BUY", Decimal("1"), Decimal("10"))
+        assert r["valid"] is False
+        assert "недоступен" in r["errors"][0]
+
+    def test_place_limit_raises_when_validation_fails(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.is_symbol_trading = lambda s: False
+        ex.symbol_info = lambda s: {"status": "BREAK"}
+        with pytest.raises(ValueError, match="валидацию"):
+            ex.place_limit("ETH-USDT", "BUY", Decimal("1"), Decimal("100"))
+
+    def test_place_limit_validate_false_posts_order(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.symbol_info = lambda s: {
+            "stepSize": Decimal("0.01"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.01"),
+            "minNotional": Decimal("0"),
+        }
+        ex._request = MagicMock(return_value={"orderId": "lim1"})
+        with patch("exchange.time.sleep"):
+            res = ex.place_limit("ETH-USDT", "BUY", Decimal("1"), Decimal("2000"), validate=False)
+        assert res["orderId"] == "lim1"
+        ex._request.assert_called_once()
+
+    def test_place_limit_validate_false_zero_price_returns_none(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.symbol_info = lambda s: {
+            "stepSize": Decimal("0.01"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.01"),
+            "minNotional": Decimal("0"),
+        }
+        assert ex.place_limit("ETH-USDT", "BUY", Decimal("1"), Decimal("0"), validate=False) is None
+
+    def test_place_limit_bad_side_raises(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.symbol_info = lambda s: {
+            "stepSize": Decimal("0.01"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.01"),
+            "minNotional": Decimal("0"),
+        }
+        with pytest.raises(ValueError, match="Bad side"):
+            ex.place_limit("ETH-USDT", "HOLD", Decimal("1"), Decimal("100"), validate=False)
+
+
+class TestBingXSpotReferralsAndSymbols:
+    """get_referrals_from_api, get_referral_commissions, get_all_symbols, get_popular_symbols, get_order_limits."""
+
+    def test_get_referrals_from_api_returns_on_first_endpoint(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+
+        def req(m, ep, p=None):
+            if "invitee/list" in ep and "commission" not in ep:
+                return {"invitees": [{"uid": "1"}], "total": 1, "page": 1, "pageSize": 50}
+            return None
+
+        ex._request = req
+        out = ex.get_referrals_from_api(page=1, page_size=50)
+        assert out is not None
+        assert len(out["invitees"]) == 1
+        assert out["total"] == 1
+
+    def test_get_referral_commissions_returns_structure(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+
+        def req(m, ep, p=None):
+            if "commission" in ep:
+                return {
+                    "commissions": [{"a": 1}],
+                    "totalCommission": "10",
+                    "total": 1,
+                    "page": 1,
+                    "pageSize": 50,
+                }
+            return None
+
+        ex._request = req
+        out = ex.get_referral_commissions()
+        assert out is not None
+        assert out["totalCommission"] == "10"
+
+    def test_get_all_symbols_filters_trading(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex._request = lambda m, ep, p=None: {
+            "symbols": [
+                {"symbol": "AAA-USDT", "baseAsset": "AAA", "quoteAsset": "USDT", "status": 1},
+                {"symbol": "BBB-USDT", "baseAsset": "BBB", "quoteAsset": "USDT", "status": 0},
+            ]
+        }
+        syms = ex.get_all_symbols()
+        assert len(syms) == 1
+        assert syms[0]["symbol"] == "AAA-USDT"
+
+    def test_get_popular_symbols_orders_and_limits(self):
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.get_all_symbols = lambda: [
+            {"symbol": "DOGE-USDT", "baseAsset": "DOGE", "quoteAsset": "USDT", "status": "TRADING"},
+            {"symbol": "ZZZ-USDT", "baseAsset": "ZZZ", "quoteAsset": "USDT", "status": "TRADING"},
+            {"symbol": "BTC-USDT", "baseAsset": "BTC", "quoteAsset": "USDT", "status": "TRADING"},
+        ]
+        pop = ex.get_popular_symbols(quote_asset="USDT", limit=10)
+        assert len(pop) <= 10
+        symbols = [p["symbol"] for p in pop]
+        assert "BTC-USDT" in symbols
+
+    def test_get_order_limits_returns_symbol_info_fields(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.symbol_info = lambda s: {
+            "minQty": Decimal("0.1"),
+            "minNotional": Decimal("5"),
+            "stepSize": Decimal("0.01"),
+            "tickSize": Decimal("0.01"),
+            "status": "TRADING",
+        }
+        lim = ex.get_order_limits("ETH-USDT")
+        assert lim["minQty"] == Decimal("0.1")
+        assert lim["status"] == "TRADING"
+
+    def test_get_order_limits_on_error_returns_defaults(self):
+        from decimal import Decimal
+        from exchange import BingXSpot
+
+        ex = BingXSpot("k", "s")
+        ex.symbol_info = lambda s: (_ for _ in ()).throw(RuntimeError("boom"))
+        lim = ex.get_order_limits("ETH-USDT")
+        assert lim["status"] == "UNKNOWN"
+        assert lim["stepSize"] == Decimal("0.000001")

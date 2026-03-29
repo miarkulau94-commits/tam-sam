@@ -112,6 +112,24 @@ class TestTradingBotWithMockedExchange:
             bot.grid_step_pct = Decimal("0.015")
             assert bot.get_max_buy_orders() in (60, 65)
 
+    def test_get_max_buy_orders_interpolates_between_075_and_15(self, temp_dirs, mock_exchange):
+        """Линейная интерполяция между 0.75% (125) и 1.5% (60) для промежуточного шага."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_interp_max_buy")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.grid_step_pct = Decimal("0.01")
+            m = bot.get_max_buy_orders()
+        assert m == 103
+
     def test_get_required_notional_positive(self, temp_dirs, mock_exchange):
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test")
@@ -1733,3 +1751,57 @@ class TestGridMultiplicativeStep:
         for i in range(len(prices) - 1):
             pct_step = (prices[i + 1] - prices[i]) / prices[i]
             assert 0.005 <= pct_step <= 0.025, f"Шаг между уровнями должен быть ~1.5%: {pct_step:.4f}"
+
+
+class TestTradingBotCalculateVwap:
+    """Тесты trading_bot.calculate_vwap (средняя из позиций vs цена с биржи)."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.mark.asyncio
+    async def test_uses_position_manager_average_when_positive(self, temp_dirs):
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_vwap_avg")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_ex = MagicMock()
+        mock_ex.circuit_breaker = MagicMock()
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_ex),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(1, "k", "s", symbol="ETH-USDT")
+            bot.position_manager.get_average_price = MagicMock(return_value=Decimal("123.45"))
+            bot.get_current_price = AsyncMock(return_value=Decimal("999"))
+            v = await bot.calculate_vwap()
+        assert v == Decimal("123.45")
+        bot.get_current_price.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_current_price_when_average_zero(self, temp_dirs):
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_vwap_price")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_ex = MagicMock()
+        mock_ex.circuit_breaker = MagicMock()
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_ex),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(1, "k", "s", symbol="ETH-USDT")
+            bot.position_manager.get_average_price = MagicMock(return_value=Decimal("0"))
+            bot.get_current_price = AsyncMock(return_value=Decimal("2500.5"))
+            v = await bot.calculate_vwap()
+        assert v == Decimal("2500.5")
+        bot.get_current_price.assert_called_once()

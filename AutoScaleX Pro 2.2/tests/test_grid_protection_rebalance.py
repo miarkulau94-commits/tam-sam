@@ -142,3 +142,399 @@ class TestRebalanceCheck:
             bot.orders = []
             await rebalance.check_rebalancing(bot, Decimal("100"))
         mock_ex.place_market.assert_not_called()
+
+
+class TestRebalancingApply:
+    """Тесты rebalance._rebalancing_apply_after_market_buy."""
+
+    @pytest.mark.asyncio
+    async def test_returns_false_without_order_id(self):
+        bot = MagicMock()
+        assert await rebalance._rebalancing_apply_after_market_buy(bot, {}, Decimal("1")) is False
+        assert await rebalance._rebalancing_apply_after_market_buy(bot, {"x": 1}, Decimal("1")) is False
+
+    @pytest.mark.asyncio
+    async def test_success_calls_rebuild_sell_sync_and_bottom_buy_when_sell_count_high(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.base_asset_name = "ETH"
+        bot.quote_asset_name = "USDT"
+        bot.position_manager = MagicMock()
+        bot.ex.get_order = AsyncMock(return_value={"price": "2000", "executedQty": "0.05"})
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.balance = AsyncMock(side_effect=[Decimal("0.05"), Decimal("1000")])
+        bot.get_current_price = AsyncMock(return_value=Decimal("2000"))
+        bot.rebuild_buy_grid_from_price = AsyncMock()
+        bot.create_sell_grid_only = AsyncMock(return_value=3)
+        bot.save_state = MagicMock()
+        bot._cancelled_buy_for_rebalance_prep = True
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance.create_buy_orders_at_bottom", new_callable=AsyncMock
+        ) as m_bottom:
+            m_bottom.return_value = 1
+            ok = await rebalance._rebalancing_apply_after_market_buy(bot, {"orderId": "m1"}, Decimal("1999"))
+        assert ok is True
+        assert bot._cancelled_buy_for_rebalance_prep is False
+        bot.save_state.assert_called_once()
+        m_bottom.assert_called_once()
+        bot.position_manager.add_position.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_bottom_buy_when_sell_created_below_three(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.base_asset_name = "ETH"
+        bot.quote_asset_name = "USDT"
+        bot.position_manager = MagicMock()
+        bot.ex.get_order = AsyncMock(return_value=None)
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.balance = AsyncMock(side_effect=[Decimal("0"), Decimal("1000")])
+        bot.get_current_price = AsyncMock(return_value=Decimal("2000"))
+        bot.rebuild_buy_grid_from_price = AsyncMock()
+        bot.create_sell_grid_only = AsyncMock(return_value=2)
+        bot.save_state = MagicMock()
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance.create_buy_orders_at_bottom", new_callable=AsyncMock
+        ) as m_bottom:
+            await rebalance._rebalancing_apply_after_market_buy(bot, {"orderId": "m1"}, Decimal("2000"))
+        m_bottom.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_order_exception_does_not_break_flow(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.base_asset_name = "ETH"
+        bot.quote_asset_name = "USDT"
+        bot.position_manager = MagicMock()
+        bot.ex.get_order = AsyncMock(side_effect=RuntimeError("api"))
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.balance = AsyncMock(side_effect=[Decimal("0"), Decimal("1000")])
+        bot.get_current_price = AsyncMock(return_value=Decimal("2000"))
+        bot.rebuild_buy_grid_from_price = AsyncMock()
+        bot.create_sell_grid_only = AsyncMock(return_value=0)
+        bot.save_state = MagicMock()
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance.create_buy_orders_at_bottom", new_callable=AsyncMock
+        ):
+            await rebalance._rebalancing_apply_after_market_buy(bot, {"orderId": "m1"}, Decimal("2000"))
+        bot.position_manager.add_position.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_current_price_exception_uses_passed_price_for_rebuild(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.base_asset_name = "ETH"
+        bot.quote_asset_name = "USDT"
+        bot.position_manager = MagicMock()
+        bot.ex.get_order = AsyncMock(return_value=None)
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.balance = AsyncMock(side_effect=[Decimal("0"), Decimal("1000")])
+        bot.get_current_price = AsyncMock(side_effect=ConnectionError("ws down"))
+        bot.rebuild_buy_grid_from_price = AsyncMock()
+        bot.create_sell_grid_only = AsyncMock(return_value=0)
+        bot.save_state = MagicMock()
+        fallback = Decimal("1234.56")
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance.create_buy_orders_at_bottom", new_callable=AsyncMock
+        ):
+            await rebalance._rebalancing_apply_after_market_buy(bot, {"orderId": "m1"}, fallback)
+        bot.rebuild_buy_grid_from_price.assert_called_once_with(fallback)
+
+    @pytest.mark.asyncio
+    async def test_rebuild_buy_raises_still_runs_sell_grid(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.base_asset_name = "ETH"
+        bot.quote_asset_name = "USDT"
+        bot.position_manager = MagicMock()
+        bot.ex.get_order = AsyncMock(return_value=None)
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.balance = AsyncMock(side_effect=[Decimal("0"), Decimal("1000")])
+        bot.get_current_price = AsyncMock(return_value=Decimal("2000"))
+        bot.rebuild_buy_grid_from_price = AsyncMock(side_effect=ValueError("grid"))
+        bot.create_sell_grid_only = AsyncMock(return_value=0)
+        bot.save_state = MagicMock()
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance.create_buy_orders_at_bottom", new_callable=AsyncMock
+        ):
+            ok = await rebalance._rebalancing_apply_after_market_buy(bot, {"orderId": "m1"}, Decimal("2000"))
+        assert ok is True
+        bot.create_sell_grid_only.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_create_sell_grid_raises_treated_as_zero(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.base_asset_name = "ETH"
+        bot.quote_asset_name = "USDT"
+        bot.position_manager = MagicMock()
+        bot.ex.get_order = AsyncMock(return_value=None)
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.balance = AsyncMock(side_effect=[Decimal("0"), Decimal("1000")])
+        bot.get_current_price = AsyncMock(return_value=Decimal("2000"))
+        bot.rebuild_buy_grid_from_price = AsyncMock()
+        bot.create_sell_grid_only = AsyncMock(side_effect=RuntimeError("bingx"))
+        bot.save_state = MagicMock()
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance.create_buy_orders_at_bottom", new_callable=AsyncMock
+        ) as m_bottom:
+            await rebalance._rebalancing_apply_after_market_buy(bot, {"orderId": "m1"}, Decimal("2000"))
+        m_bottom.assert_not_called()
+
+
+class TestCheckRebalancingBranches:
+    """Тесты rebalance.check_rebalancing — market buy, недостаток баланса, ретраи."""
+
+    def _bot_all_sell_gone(self):
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.base_asset_name = "ETH"
+        bot.buy_order_value = Decimal("10")
+        bot.orders = []
+        bot.ex = MagicMock()
+        bot.ex.open_orders = AsyncMock(return_value=[])
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("100"))
+        bot.ex.balance = AsyncMock(return_value=Decimal("100"))
+        bot.ex.place_market = AsyncMock(return_value={"orderId": "mk1"})
+        return bot
+
+    @pytest.mark.asyncio
+    async def test_calls_apply_after_successful_market_buy(self):
+        bot = self._bot_all_sell_gone()
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_called_once()
+        bot.ex.place_market.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_apply_when_market_returns_without_order_id(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.place_market = AsyncMock(return_value={})
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_insufficient_for_full_uses_adjusted_quote_minus_reserve(self):
+        """available < 5*buy+2, но > 1 — market buy на (available - 1)."""
+        bot = self._bot_all_sell_gone()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("40"))
+        bot.ex.place_market = AsyncMock(return_value={"orderId": "adj"})
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_called_once()
+        assert bot.ex.place_market.call_args[1]["quote_order_qty"] == Decimal("39")
+
+    @pytest.mark.asyncio
+    async def test_insufficient_error_on_first_buy_retries_with_adjusted_amount(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.place_market = AsyncMock(
+            side_effect=[
+                Exception("insufficient balance for order"),
+                {"orderId": "retry1"},
+            ]
+        )
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        assert bot.ex.place_market.call_count == 2
+        assert bot.ex.place_market.call_args_list[1][1]["quote_order_qty"] == Decimal("99")
+        m_apply.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_permission_denied_inner_raise_caught_by_outer_handler(self):
+        """Внутренний raise Permission denied перехватывается внешним try в check_rebalancing (лог, без проброса)."""
+        bot = self._bot_all_sell_gone()
+        bot.ex.place_market = AsyncMock(side_effect=RuntimeError("Permission denied"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_open_orders_error_treats_exchange_as_no_sells(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.open_orders = AsyncMock(side_effect=OSError("timeout"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_insufficient_retry_returns_empty_no_apply(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.place_market = AsyncMock(
+            side_effect=[
+                Exception("insufficient balance"),
+                {},
+            ]
+        )
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        assert bot.ex.place_market.call_count == 2
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_insufficient_retry_second_call_raises(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.place_market = AsyncMock(
+            side_effect=[
+                Exception("insufficient balance"),
+                RuntimeError("secondary failure"),
+            ]
+        )
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generic_market_error_not_insufficient(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.place_market = AsyncMock(side_effect=RuntimeError("Network timeout"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_insufficient_but_quote_le_one_skips_retry(self):
+        """Первая ветка (full buy), insufficient, available ≤ 1 — без второго place_market."""
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.buy_order_value = Decimal("-0.4")
+        bot.orders = []
+        bot.ex = MagicMock()
+        bot.ex.open_orders = AsyncMock(return_value=[])
+        bot.ex.invalidate_balance_cache = AsyncMock()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("0.5"))
+        bot.ex.balance = AsyncMock(return_value=Decimal("0.5"))
+        bot.ex.place_market = AsyncMock(side_effect=Exception("insufficient balance"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        bot.ex.place_market.assert_called_once()
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_low_available_branch_market_returns_empty(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("40"))
+        bot.ex.place_market = AsyncMock(return_value={})
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+        assert bot.ex.place_market.call_args[1]["quote_order_qty"] == Decimal("39")
+
+    @pytest.mark.asyncio
+    async def test_low_available_branch_insufficient_error(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("40"))
+        bot.ex.place_market = AsyncMock(side_effect=Exception("Insufficient balance"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_low_available_branch_other_error(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("40"))
+        bot.ex.place_market = AsyncMock(side_effect=RuntimeError("bad request"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        m_apply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_low_available_not_enough_for_adjusted_path(self):
+        bot = self._bot_all_sell_gone()
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("0.5"))
+        with patch("rebalance.asyncio.sleep", new_callable=AsyncMock), patch(
+            "rebalance._rebalancing_apply_after_market_buy", new_callable=AsyncMock
+        ) as m_apply:
+            await rebalance.check_rebalancing(bot, Decimal("2000"))
+        bot.ex.place_market.assert_not_called()
+        m_apply.assert_not_called()
+
+
+class TestCheckRebalancingAfterAllBuyFilled:
+    """Тесты rebalance.check_rebalancing_after_all_buy_filled."""
+
+    @pytest.mark.asyncio
+    async def test_creates_critical_sell_when_vwap_positive(self):
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.symbol = "ETH-USDT"
+        bot.orders = []
+        bot.ex.open_orders = AsyncMock(return_value=[])
+        bot.calculate_vwap = AsyncMock(return_value=Decimal("12.34"))
+        bot.create_critical_sell_grid = AsyncMock(return_value={"created_count": 2})
+        await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
+        bot.create_critical_sell_grid.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_create_grid_when_vwap_zero(self):
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.orders = []
+        bot.ex.open_orders = AsyncMock(return_value=[])
+        bot.calculate_vwap = AsyncMock(return_value=Decimal("0"))
+        bot.create_critical_sell_grid = AsyncMock()
+        await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
+        bot.create_critical_sell_grid.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_warning_when_created_count_zero(self):
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.orders = []
+        bot.ex.open_orders = AsyncMock(return_value=[])
+        bot.calculate_vwap = AsyncMock(return_value=Decimal("10"))
+        bot.create_critical_sell_grid = AsyncMock(return_value={"created_count": 0})
+        await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
+        bot.create_critical_sell_grid.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_outer_exception_when_open_orders_fails(self):
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.orders = []
+        bot.ex.open_orders = AsyncMock(side_effect=OSError("unavailable"))
+        await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
+        bot.calculate_vwap.assert_not_called()

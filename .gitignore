@@ -33,6 +33,7 @@ pending_referrals.json
 .pytest_cache/
 .coverage
 htmlcov/
+coverage.xml
 
 # IDE
 .idea/

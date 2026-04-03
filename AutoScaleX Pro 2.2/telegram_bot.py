@@ -854,6 +854,15 @@ class TelegramBotManager:
             # чтобы открытие «Баланс» не останавливало работающий бот (файл мог содержать STOPPED из прошлой сессии)
             await asyncio.to_thread(bot.load_state, True)  # skip_bot_state=True
 
+            if bot.profit_bank < 0:
+                bot.profit_bank = Decimal("0")
+
+            try:
+                if getattr(bot, "state", None) != BotState.STOPPED:
+                    await bot.sync_orders_from_exchange()
+            except Exception as sync_err:
+                log.debug("Balance: sync_orders_from_exchange skipped: %s", sync_err)
+
             price = await bot.get_current_price()
             quote_balance = await bot.ex.balance(bot.quote_asset_name)
             base_balance = await bot.ex.balance(bot.base_asset_name)
@@ -872,7 +881,14 @@ class TelegramBotManager:
                 profit = Decimal("0")
                 roi = Decimal("0")
 
-            # Profit Bank — то же значение из state, от которого срабатывает пирамидинг (check_pyramiding)
+            avg_sell = bot.average_open_sell_price()
+            avg_sell_line = (
+                f"📉 Средняя цена открытых SELL: `{avg_sell:.2f} {bot.quote_asset_name}`\n"
+                if avg_sell is not None
+                else f"📉 Средняя цена открытых SELL: `—`\n"
+            )
+
+            # Profit Bank — накопленная только положительная прибыль; пирамидинг при >= buy_order_value (см. check_pyramiding)
             message = (
                 f"💰 **Баланс**\n\n"
                 f"{bot.quote_asset_name}: `{quote_balance:.2f}`\n"
@@ -880,6 +896,7 @@ class TelegramBotManager:
                 f"💵 Итого: `{total_equity:.2f} {bot.quote_asset_name}`\n"
                 f"📈 Прибыль: `{profit:.2f} {bot.quote_asset_name}` ({roi:.2f}%)\n"
                 f"📊 Цена {bot.base_asset_name}: `{price:.2f} {bot.quote_asset_name}`\n"
+                f"{avg_sell_line}"
                 f"💎 Profit Bank: `{bot.profit_bank:.2f} {bot.quote_asset_name}` (для пирамидинга)\n"
                 f"📌 Пара: `{bot.symbol}`"
             )

@@ -523,6 +523,13 @@ class TestSettingsMenuOrderValues:
 # --- handle_balance ---
 
 
+def _mock_bot_for_balance(mock_bot):
+    """Атрибуты для handle_balance: sync, средняя SELL, состояние не STOPPED."""
+    mock_bot.state = BotState.TRADING
+    mock_bot.sync_orders_from_exchange = AsyncMock()
+    mock_bot.average_open_sell_price = MagicMock(return_value=None)
+
+
 @pytest.mark.asyncio
 class TestHandleBalance:
     """Тесты handle_balance — экран «💰 Баланс», initial_equity и Profit Bank."""
@@ -534,6 +541,7 @@ class TestHandleBalance:
         query.edit_message_text = AsyncMock()
 
         mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
         mock_bot.initial_equity = Decimal("0")
         mock_bot.profit_bank = Decimal("18.62")
         mock_bot.quote_asset_name = "USDT"
@@ -563,6 +571,7 @@ class TestHandleBalance:
         assert "Прибыль: `0.00" in msg
         assert "Profit Bank: `18.62" in msg
         assert "1295.07" in msg
+        assert "Средняя цена открытых SELL" in msg
 
     async def test_balance_shows_profit_and_roi_when_initial_equity_set(self):
         """При initial_equity > 0 в сообщении считаются прибыль и ROI."""
@@ -570,6 +579,7 @@ class TestHandleBalance:
         query = AsyncMock()
 
         mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
         mock_bot.initial_equity = Decimal("1000")
         mock_bot.profit_bank = Decimal("5.00")
         mock_bot.quote_asset_name = "USDT"
@@ -599,6 +609,7 @@ class TestHandleBalance:
         query = AsyncMock()
 
         mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
         mock_bot.initial_equity = Decimal("500")
         mock_bot.profit_bank = Decimal("0")
         mock_bot.quote_asset_name = "USDT"
@@ -625,6 +636,7 @@ class TestHandleBalance:
         query = AsyncMock()
 
         mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
         mock_bot.initial_equity = Decimal("1000")
         mock_bot.profit_bank = Decimal("18.38")  # из state = то, от чего срабатывает пирамидинг
         mock_bot.quote_asset_name = "USDT"
@@ -656,6 +668,7 @@ class TestHandleBalance:
         query = AsyncMock()
 
         mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
         mock_bot.initial_equity = Decimal("500")
         mock_bot.profit_bank = Decimal("12.34")
         mock_bot.quote_asset_name = "USDT"
@@ -680,6 +693,35 @@ class TestHandleBalance:
         msg = safe_edit.call_args[0][1]
         assert "Profit Bank: `12.34" in msg
         assert "для пирамидинга" in msg
+
+    async def test_balance_shows_average_open_sell_price_when_present(self):
+        """Строка со средневзвешенной ценой открытых SELL при наличии ордеров в памяти."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+
+        mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
+        mock_bot.average_open_sell_price = MagicMock(return_value=Decimal("1.246"))
+        mock_bot.initial_equity = Decimal("500")
+        mock_bot.profit_bank = Decimal("0")
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "DOT"
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("1.24"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("600"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("100"), Decimal("62.5")])
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=lambda fn, *a: fn(*a)):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock) as safe_edit:
+                        await mgr.handle_balance(query, 333)
+
+        msg = safe_edit.call_args[0][1]
+        assert "Средняя цена открытых SELL: `1.25 USDT`" in msg
 
 
 @pytest.mark.asyncio

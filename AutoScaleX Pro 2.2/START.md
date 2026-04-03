@@ -42,8 +42,9 @@ cp env.example .env
 Откройте файл `.env` и заполните:
 
 ```env
-# Telegram Bot (ОБЯЗАТЕЛЬНО)
+# Telegram Bot и шифрование (ОБЯЗАТЕЛЬНО)
 TG_TOKEN=ваш_telegram_бот_токен
+ENCRYPTION_SECRET=длинная_случайная_строка_для_шифрования_API_ключей
 TG_ADMIN_ID=ваш_telegram_id
 
 # BingX API (можно настроить позже через бота)

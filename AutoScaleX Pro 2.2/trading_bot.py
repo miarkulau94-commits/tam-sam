@@ -137,6 +137,9 @@ class TradingBot:
                             log.debug(f"profit_bank loaded from user_data: {self.profit_bank}")
                     except (TypeError, ValueError, OSError) as e:
                         log.debug(f"Could not load profit_bank from user_data: {e}")
+                # Старые состояния могли иметь отрицательный банк; теперь храним только накопленную положительную прибыль
+                if self.profit_bank < 0:
+                    self.profit_bank = Decimal("0")
 
                 # Восстанавливаем FIFO-позиции из истории сделок, чтобы profit при следующих SELL считался верно (не «призрачная» прибыль)
                 if self.statistics and getattr(self.statistics, "trades", None) and self.statistics.trades:
@@ -253,6 +256,8 @@ class TradingBot:
     def save_state(self) -> None:
         """Сохранить текущее состояние"""
         try:
+            if self.profit_bank < 0:
+                self.profit_bank = Decimal("0")
             # Проверяем grid_step_pct перед сохранением
             if self.grid_step_pct >= 1:
                 log.error(f"grid_step_pct >= 1 before save ({self.grid_step_pct}), fixing to {self.grid_step_pct / Decimal('100')}")
@@ -1505,6 +1510,20 @@ class TradingBot:
     def _deduplicate_orders(self):
         """Удалить дубликаты ордеров по order_id (оставляем первое вхождение)."""
         deduplicate_orders(self.orders, self.user_id, self.symbol)
+
+    def average_open_sell_price(self) -> Optional[Decimal]:
+        """Средневзвешенная цена всех открытых SELL (по объёму)."""
+        sells = [o for o in self.orders if o.side == "SELL" and o.status == "open"]
+        if not sells:
+            return None
+        total_qty = Decimal("0")
+        weighted = Decimal("0")
+        for o in sells:
+            total_qty += o.qty
+            weighted += o.price * o.qty
+        if total_qty <= 0:
+            return None
+        return weighted / total_qty
 
     async def sync_orders_from_exchange(self):
         """Синхронизировать список ордеров с биржей"""

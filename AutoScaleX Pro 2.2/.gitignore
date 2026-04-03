@@ -16,6 +16,12 @@ ENV/
 logs/
 *.log
 
+# Тесты и отчёты coverage (не коммитить)
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
 # User states and data
 user_states/
 *.json

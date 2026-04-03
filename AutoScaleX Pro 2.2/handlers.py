@@ -172,7 +172,8 @@ async def handle_sell_filled(bot: "TradingBot", order: Order, price: Decimal) ->
         bot.base_asset = await bot.ex.balance(bot.base_asset_name)
         bot.current_deposit = await bot.ex.balance(bot.quote_asset_name)
 
-        # Защита: не зачислять в profit_bank аномально большую прибыль с одной SELL (ошибка расчёта при пустых/неверных FIFO-позициях)
+        # Profit bank: копится только положительная прибыль по сделке; убытки в банк не зачисляются (не уходит в минус).
+        # Защита: не зачислять аномально большую прибыль с одной SELL (ошибка расчёта при пустых/неверных FIFO-позициях)
         if profit > config.PROFIT_BANK_MAX_PROFIT_PER_SELL:
             log.warning(
                 "[SELL FILL] Profit %.2f exceeds PROFIT_BANK_MAX_PROFIT_PER_SELL (%s), not adding to profit_bank (recorded in statistics only)",
@@ -180,10 +181,14 @@ async def handle_sell_filled(bot: "TradingBot", order: Order, price: Decimal) ->
                 config.PROFIT_BANK_MAX_PROFIT_PER_SELL,
             )
             profit_for_bank = Decimal("0")
-        else:
+        elif profit > 0:
             profit_for_bank = profit
+        else:
+            profit_for_bank = Decimal("0")
 
         bot.profit_bank += profit_for_bank
+        if bot.profit_bank < 0:
+            bot.profit_bank = Decimal("0")
         bot.total_executed_sells += 1
 
         order.status = "filled"

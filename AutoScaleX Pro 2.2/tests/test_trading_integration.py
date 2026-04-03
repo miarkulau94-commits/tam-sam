@@ -221,7 +221,7 @@ class TestTradingBotWithMockedExchange:
         assert bot.grid_step_pct == config.GRID_STEP_PCT
 
     def test_load_state_profit_bank_from_user_data_overrides_state(self, temp_dirs, mock_exchange):
-        """При загрузке state profit_bank подменяется из user_data/<uid>.json (источник истины)."""
+        """При загрузке state profit_bank подменяется из user_data; отрицательные значения сбрасываются в 0."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_profit_bank")
         os.makedirs(trades_dir, exist_ok=True)
@@ -254,7 +254,8 @@ class TestTradingBotWithMockedExchange:
             patch("persistence.config.USER_DATA_DIR", user_data_dir),
         ):
             bot = TradingBot(12345, "key", "secret", symbol="KSM-USDT")
-        assert bot.profit_bank == Decimal("-1.84514217971")
+        # Отрицательные значения в старых файлах приводятся к 0 — в банк копится только положительная прибыль
+        assert bot.profit_bank == Decimal("0")
 
     def test_save_state_persists_cancelled_buy_for_rebalance_prep(self, temp_dirs, mock_exchange):
         """save_state записывает флаг cancelled_buy_for_rebalance_prep в state."""
@@ -518,6 +519,54 @@ class TestTradingCycleIntegration:
             assert order.status == "filled"
             assert bot.profit_bank > initial_profit
             assert bot.total_executed_sells == initial_sells + 1
+
+    @pytest.mark.asyncio
+    async def test_handle_sell_filled_negative_profit_does_not_reduce_profit_bank(self, temp_dirs, mock_exchange):
+        """Убыточная SELL не уменьшает profit_bank (накопление только положительной прибыли)."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_sell_loss_bank")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.side_effect = lambda a: Decimal("0") if "ETH" in a else Decimal("1000")
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        mock_exchange.place_limit.return_value = {"orderId": "new_buy_456"}
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.profit_bank = Decimal("10")
+            bot.position_manager.add_position(Decimal("100"), Decimal("0.005"))
+            order = Order("sell_loss", "SELL", Decimal("85"), Decimal("0.005"), status="open")
+            await bot.handle_sell_filled(order, Decimal("85"))
+            assert order.status == "filled"
+            assert bot.profit_bank == Decimal("10")
+
+    def test_average_open_sell_price_weighted_and_none(self, temp_dirs, mock_exchange):
+        """Средневзвешенная цена открытых SELL; без ордеров — None."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_avg_sell")
+        os.makedirs(trades_dir, exist_ok=True)
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            assert bot.average_open_sell_price() is None
+            bot.orders = [
+                Order("s1", "SELL", Decimal("2"), Decimal("3"), status="open"),
+                Order("s2", "SELL", Decimal("4"), Decimal("1"), status="open"),
+            ]
+            # (2*3 + 4*1) / 4 = 2.5
+            assert bot.average_open_sell_price() == Decimal("2.5")
 
     @pytest.mark.asyncio
     async def test_sync_orders_adds_missing(self, temp_dirs, mock_exchange):

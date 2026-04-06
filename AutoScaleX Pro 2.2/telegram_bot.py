@@ -500,7 +500,15 @@ class TelegramBotManager:
         elif data == "pause_bot":
             await self.handle_pause_bot(query, user_id)
         elif data == "stop_bot":
+            await self.show_stop_confirmation(query)
+        elif data == "confirm_stop_yes":
             await self.handle_stop_bot(query, user_id)
+        elif data == "confirm_stop_no":
+            await _safe_edit_message(
+                query,
+                "🎯 Главное меню AutoScaleX",
+                reply_markup=self._get_main_menu_keyboard(),
+            )
         elif data == "balance":
             await self.handle_balance(query, user_id)
         elif data == "orders":
@@ -532,7 +540,15 @@ class TelegramBotManager:
         elif data == "change_api_keys":
             await self.handle_change_api_keys(query, user_id)
         elif data == "rebalance_sell":
+            await self.show_rebalance_confirmation(query)
+        elif data == "confirm_rebalance_yes":
             await self.handle_rebalance_sell(query, user_id)
+        elif data == "confirm_rebalance_no":
+            await _safe_edit_message(
+                query,
+                "🎯 Главное меню AutoScaleX",
+                reply_markup=self._get_main_menu_keyboard(),
+            )
         elif data == "add_buy":
             await self.handle_add_buy(query, user_id)
         elif data == "back_to_menu":
@@ -606,6 +622,44 @@ class TelegramBotManager:
                 ],
                 [InlineKeyboardButton("🔑 Ввести API ключи", callback_data="set_api_keys")],
             ]
+        )
+
+    def _get_confirm_stop_keyboard(self):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Да", callback_data="confirm_stop_yes"),
+                    InlineKeyboardButton("Нет", callback_data="confirm_stop_no"),
+                ],
+            ]
+        )
+
+    def _get_confirm_rebalance_keyboard(self):
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Да", callback_data="confirm_rebalance_yes"),
+                    InlineKeyboardButton("Нет", callback_data="confirm_rebalance_no"),
+                ],
+            ]
+        )
+
+    async def show_stop_confirmation(self, query):
+        """Подтверждение перед остановкой бота (защита от случайного нажатия)."""
+        await _safe_edit_message(
+            query,
+            "⚠️ Вы точно уверены в прекращении работы?\n\n"
+            "Будут отменены все ордера, бот остановлен.",
+            reply_markup=self._get_confirm_stop_keyboard(),
+        )
+
+    async def show_rebalance_confirmation(self, query):
+        """Подтверждение перед ребалансировкой SELL (защита от случайного нажатия)."""
+        await _safe_edit_message(
+            query,
+            "⚠️ Вы подтверждаете ребалансировку?\n\n"
+            "SELL-сетка будет перестроена от VWAP.",
+            reply_markup=self._get_confirm_rebalance_keyboard(),
         )
 
     async def handle_start_bot(self, query, user_id: int):

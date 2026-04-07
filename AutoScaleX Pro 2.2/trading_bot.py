@@ -1642,10 +1642,18 @@ class TradingBot:
 
             # Проверяем расхождение между памятью и биржей
             if len(open_orders_in_memory) != len(exchange_orders):
-                log.warning(
-                    "[CHECK_ORDERS] %s | Mismatch: %s in memory vs %s on exchange (diff=%s)",
-                    self._log_prefix(), len(open_orders_in_memory), len(exchange_orders), len(open_orders_in_memory) - len(exchange_orders)
-                )
+                diff = len(open_orders_in_memory) - len(exchange_orders)
+                # |diff|<=1 чаще всего — только что исполнился ордер или лаг API; шире — стоит смотреть вручную
+                if abs(diff) <= 1:
+                    log.info(
+                        "[CHECK_ORDERS] %s | Mismatch (typical): %s in memory vs %s on exchange (diff=%s)",
+                        self._log_prefix(), len(open_orders_in_memory), len(exchange_orders), diff,
+                    )
+                else:
+                    log.warning(
+                        "[CHECK_ORDERS] %s | Mismatch: %s in memory vs %s on exchange (diff=%s)",
+                        self._log_prefix(), len(open_orders_in_memory), len(exchange_orders), diff,
+                    )
 
             # Ищем ордера, которые есть в памяти как open, но их нет в открытых на бирже - это исполненные ордера
             filled_orders = []

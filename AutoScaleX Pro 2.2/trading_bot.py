@@ -687,11 +687,13 @@ class TradingBot:
             sell_qty_per_order = available_base_asset / Decimal(config.CRITICAL_SELL_DIVISIONS)
 
             log.info(
-                f"Creating {config.CRITICAL_SELL_DIVISIONS} SELL orders from VWAP {self.vwap:.8f} with multipliers {config.CRITICAL_GRID_STEP_MULTIPLIER}"
+                f"Creating {config.CRITICAL_SELL_DIVISIONS} SELL orders from VWAP {self.vwap:.8f} "
+                f"at +{', +'.join(str(p) for p in config.CRITICAL_SELL_PROFIT_PCT)}% above VWAP"
             )
 
-            for i, multiplier in enumerate(config.CRITICAL_GRID_STEP_MULTIPLIER, 1):
-                level_price = self.vwap * (Decimal("1") + self.grid_step_pct * Decimal(multiplier))
+            for i, profit_pct in enumerate(config.CRITICAL_SELL_PROFIT_PCT, 1):
+                offset = profit_pct / Decimal("100")
+                level_price = self.vwap * (Decimal("1") + offset)
                 level_price = self._align_to_tick(level_price, tick)
 
                 if level_price <= 0:
@@ -719,12 +721,12 @@ class TradingBot:
                             "order_id": order.order_id,
                             "price": float(level_price),
                             "qty": float(qty),
-                            "multiplier": multiplier,
-                            "profit_pct": float(self.grid_step_pct * Decimal(multiplier) * Decimal("100")),
+                            "multiplier": i,
+                            "profit_pct": float(profit_pct),
                         }
                         result["orders_info"].append(order_info)
                         log.info(
-                            f"🟥 SELL order {i}: Placed at {level_price:.8f} (VWAP * {1 + float(self.grid_step_pct * Decimal(multiplier)):.4f}), qty={qty:.8f}"
+                            f"🟥 SELL order {i}: Placed at {level_price:.8f} (VWAP * {float(Decimal('1') + offset):.4f}), qty={qty:.8f}"
                         )
                         await asyncio.sleep(0.2)
                     else:

@@ -51,9 +51,9 @@ except Exception:
     FEE_RATE = Decimal("0.001")
 BASE_DEPOSIT = Decimal("1000")
 
-# Критический уровень
-CRITICAL_GRID_STEP_MULTIPLIER = [2, 4, 6]
-CRITICAL_SELL_DIVISIONS = 3
+# Критический уровень / ребаланс SELL: три уровня цены над VWAP (%, одинаково для авто и ручного ребаланса)
+CRITICAL_SELL_PROFIT_PCT = [Decimal("1.5"), Decimal("2.5"), Decimal("3.5")]
+CRITICAL_SELL_DIVISIONS = len(CRITICAL_SELL_PROFIT_PCT)
 
 # BingX настройки (sandbox не используется — всегда production API)
 MIN_ORDER = Decimal(os.getenv("MIN_ORDER", "20"))

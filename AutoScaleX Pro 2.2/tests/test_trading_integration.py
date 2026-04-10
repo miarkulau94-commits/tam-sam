@@ -425,12 +425,12 @@ class TestTradingCycleIntegration:
 
     @pytest.mark.asyncio
     async def test_handle_buy_filled_uses_available_balance_for_sell_qty(self, temp_dirs, mock_exchange):
-        """При создании SELL после BUY используется available_balance(base) с биржи для объёма."""
+        """После BUY создаётся SELL; available_balance(base) запрашивается (инвалидация кэша + проверка free)."""
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_avail")
         os.makedirs(trades_dir, exist_ok=True)
         mock_exchange.balance.side_effect = lambda a: Decimal("0.5") if "ETH" in a else Decimal("900")
-        mock_exchange.available_balance.return_value = Decimal("0.01")  # free ETH для SELL
+        mock_exchange.available_balance.return_value = Decimal("1")  # free ETH ≥ объёма хеджа после BUY
         mock_exchange.symbol_info.return_value = {
             "stepSize": Decimal("0.0001"),
             "tickSize": Decimal("0.01"),
@@ -461,8 +461,8 @@ class TestTradingCycleIntegration:
         state_dir, user_data_dir = temp_dirs
         trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_sell_tick")
         os.makedirs(trades_dir, exist_ok=True)
-        mock_exchange.balance.side_effect = lambda a: Decimal("0.01") if "DOT" in a else Decimal("500")
-        mock_exchange.available_balance.return_value = Decimal("0.01")
+        mock_exchange.balance.side_effect = lambda a: Decimal("10") if "DOT" in a else Decimal("500")
+        mock_exchange.available_balance.return_value = Decimal("10")  # free DOT ≥ хеджа (~7) после BUY
         mock_exchange.place_limit.return_value = {"orderId": "sell_after_buy_tick"}
         mock_exchange.symbol_info.return_value = {
             "stepSize": Decimal("0.0001"),

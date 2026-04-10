@@ -67,18 +67,26 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
                 sell_price = (sell_price // tick) * tick
             log.info(f"[CREATE_SELL_AFTER_BUY] Calculated SELL price: {price:.8f} * (1 + {bot.grid_step_pct:.6f}) = {sell_price:.8f}")
 
+            await bot.ex.invalidate_balance_cache(bot.base_asset_name)
+            await asyncio.sleep(0.35)
             current_base_balance = await bot.ex.balance(bot.base_asset_name)
             available_base_asset = await bot.ex.available_balance(bot.base_asset_name)
+
+            # Парный SELL к исполненному BUY: объём = полученное с этой сделки (после комиссии), округление вниз к step.
+            # Не использовать min(available): при почти всём KSM в открытых SELL free≈0, min давал «пыль» ниже minVolume биржи.
+            sell_qty = (btc_received // step) * step
+
+            if sell_qty > available_base_asset:
+                await bot.ex.invalidate_balance_cache(bot.base_asset_name)
+                await asyncio.sleep(0.5)
+                current_base_balance = await bot.ex.balance(bot.base_asset_name)
+                available_base_asset = await bot.ex.available_balance(bot.base_asset_name)
 
             log.info(
                 f"[CREATE_SELL_AFTER_BUY] Balance check: total={current_base_balance:.8f}, available(free)={available_base_asset:.8f}, btc_received={btc_received:.8f}"
             )
-
-            sell_qty = min(btc_received, available_base_asset)
-            sell_qty = (sell_qty // step) * step
-
             log.info(
-                f"[CREATE_SELL_AFTER_BUY] Qty calculation: btc_received={btc_received:.8f}, available={available_base_asset:.8f}, sell_qty={sell_qty:.8f}"
+                f"[CREATE_SELL_AFTER_BUY] Qty calculation: btc_received={btc_received:.8f}, available={available_base_asset:.8f}, sell_qty={sell_qty:.8f} (hedge from fill, not capped by dust)"
             )
 
             existing_sell = any(o.side == "SELL" and abs(o.price - sell_price) < tick and o.status == "open" for o in bot.orders)
@@ -100,7 +108,8 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
                     log.warning(f"[CREATE_SELL_AFTER_BUY] FAILED: SELL order notional too small: {sell_notional:.8f} < {required_notional:.8f}")
                 elif available_base_asset < sell_qty:
                     log.warning(
-                        f"[CREATE_SELL_AFTER_BUY] FAILED: Insufficient base asset: available={available_base_asset:.8f}, needed={sell_qty:.8f}, total_balance={current_base_balance:.8f}"
+                        f"[CREATE_SELL_AFTER_BUY] SKIPPED: free {available_base_asset:.8f} < hedge SELL qty {sell_qty:.8f} "
+                        f"(total={current_base_balance:.8f}). If assets are locked in open SELLs, cancel some on the exchange."
                     )
                 else:
                     if bot.state == BotState.STOPPED:

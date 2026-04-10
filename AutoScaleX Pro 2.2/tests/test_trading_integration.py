@@ -738,6 +738,8 @@ class TestTradingCycleIntegration:
             # CANCELED на первых 3 — без fill; остальные 9 — memory path → handle_buy_filled
             assert bot.handle_buy_filled.await_count == 9
 
+
+
     @pytest.mark.asyncio
     async def test_create_buy_after_sell_at_max_returns_false_no_place_limit(self, temp_dirs, mock_exchange):
         """При 61 BUY и 4 открытых SELL (лимит после SELL = 61) create_buy_after_sell возвращает False и не вызывает place_limit."""
@@ -1012,6 +1014,137 @@ class TestTradingCycleIntegration:
         # 2.0 * (1 - 0.015) = 1.97, по tick 0.01 → 1.97
         assert placed_price == Decimal("1.97")
 
+
+
+class TestCheckCriticalSituation:
+    """Тесты check_critical_situation — критическая ветка при исполненных BUY без SELL и без средств."""
+
+    @pytest.fixture
+    def temp_dirs(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            with tempfile.TemporaryDirectory() as user_data_dir:
+                yield state_dir, user_data_dir
+
+    @pytest.fixture
+    def mock_exchange(self):
+        ex = MagicMock()
+        ex.balance.return_value = Decimal("0")
+        ex.available_balance.return_value = Decimal("0")
+        ex.open_orders.return_value = []
+        ex.symbol_info.return_value = {
+            "stepSize": Decimal("0.0001"),
+            "tickSize": Decimal("0.01"),
+            "minQty": Decimal("0.0001"),
+            "minNotional": Decimal("0"),
+            "status": "TRADING",
+        }
+        ex.circuit_breaker = MagicMock()
+        ex.circuit_breaker.state = MagicMock()
+        ex.invalidate_balance_cache = MagicMock()
+        return ex
+
+    @pytest.mark.asyncio
+    async def test_check_critical_situation_sends_telegram_when_no_base_and_low_quote(self, temp_dirs, mock_exchange):
+        """Все BUY filled, нет открытых SELL, base=0, quote ниже порога рыночной покупки — уведомление в Telegram."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_critical")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.side_effect = lambda a: (
+            Decimal("0") if "ETH" in a else Decimal("10")
+        )  # base 0, USDT 10 < (50*5+2)=252 при buy_order_value=50
+        notifier = AsyncMock()
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT", telegram_notifier=notifier)
+            bot.state = BotState.TRADING
+            bot.buy_order_value = Decimal("50")
+            bot.orders = [
+                Order("b1", "BUY", Decimal("2000"), Decimal("0.01"), status="filled"),
+            ]
+            await bot.check_critical_situation()
+        notifier.assert_awaited_once()
+        msg = notifier.await_args[0][0]
+        assert "КРИТИЧЕСКАЯ" in msg or "критическ" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_check_critical_situation_noop_when_not_trading(self, temp_dirs, mock_exchange):
+        """Не TRADING — ранний выход, Telegram не вызывается."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_critical2")
+        os.makedirs(trades_dir, exist_ok=True)
+        notifier = AsyncMock()
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT", telegram_notifier=notifier)
+            bot.state = BotState.STOPPED
+            bot.orders = [Order("b1", "BUY", Decimal("1"), Decimal("1"), status="filled")]
+            await bot.check_critical_situation()
+        notifier.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_check_critical_situation_noop_when_open_sell_exists(self, temp_dirs, mock_exchange):
+        """Есть открытый SELL — условие критической ситуации не выполняется."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_critical3")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.side_effect = lambda a: Decimal("0") if "ETH" in a else Decimal("10")
+        notifier = AsyncMock()
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT", telegram_notifier=notifier)
+            bot.state = BotState.TRADING
+            bot.buy_order_value = Decimal("50")
+            bot.orders = [
+                Order("b1", "BUY", Decimal("2000"), Decimal("0.01"), status="filled"),
+                Order("s1", "SELL", Decimal("2100"), Decimal("0.01"), status="open"),
+            ]
+            await bot.check_critical_situation()
+        notifier.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_check_critical_situation_noop_when_quote_sufficient_for_market_buy(self, temp_dirs, mock_exchange):
+        """USDT достаточно для порога рыночной покупки — критическое уведомление не шлём."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_critical4")
+        os.makedirs(trades_dir, exist_ok=True)
+        mock_exchange.balance.side_effect = lambda a: Decimal("0") if "ETH" in a else Decimal("500")
+        notifier = AsyncMock()
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT", telegram_notifier=notifier)
+            bot.state = BotState.TRADING
+            bot.buy_order_value = Decimal("50")
+            bot.orders = [Order("b1", "BUY", Decimal("2000"), Decimal("0.01"), status="filled")]
+            await bot.check_critical_situation()
+        notifier.assert_not_awaited()
 
 class TestPyramidingFallback:
     """Тесты запасного шага в пирамидинге: при занятой основной цене — 1% (при шаге 1.5%) или 0.5% (при 0.75%)."""

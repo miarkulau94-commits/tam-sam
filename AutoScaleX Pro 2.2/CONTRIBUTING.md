@@ -47,7 +47,8 @@
 | Ребаланс (все SELL закрыты → market buy, перестроение BUY/SELL) | `rebalance.py` |
 | Защита сетки: отмена N BUY, добавление до 5 BUY внизу при 3 BUY | `grid_protection.py` |
 | Оркестрация, state, вызов rebalance/grid_protection | `trading_bot.py` |
-| Запросы к BingX, лимитер, ретраи | `exchange.py` |
+| Запросы к BingX, лимитер, ретраи, circuit breaker (rate limit не открывает breaker) | `exchange.py` |
+| Синхронизация ордеров (`sync_orders_from_exchange`), лимит `get_order` | `trading_bot.py` |
 | Сохранение/загрузка state | `persistence.py`, `trading_bot.load_state` / `save_state` |
 | Сценарии и архитектура | **`ARCHITECTURE_AND_SCENARIOS.md`** |
 | Логика бота, сетка, пирамидинг | **`BOT_LOGIC.md`** |
@@ -63,6 +64,7 @@
 
 - Параметры стратегии, пути, лимиты: **`config.py`** и переменные окружения (`.env`).
 - Константы сценариев (число отменяемых BUY, пороги защиты): в **`config.py`** (`REBALANCE_PREP_CANCEL_BUY_COUNT`, `PROTECTION_THRESHOLD_*`).
+- Синхронизация ордеров с биржей: **`SYNC_GET_ORDER_MAX_PER_CALL`**, **`SYNC_BALANCE_MAX_GET_ORDER`** (см. `DEPLOY_VPS.md`, `ARCHITECTURE_AND_SCENARIOS.md` §1.2).
 
 ---
 

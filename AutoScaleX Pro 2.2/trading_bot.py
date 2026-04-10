@@ -1527,8 +1527,13 @@ class TradingBot:
             return None
         return weighted / total_qty
 
-    async def sync_orders_from_exchange(self):
-        """Синхронизировать список ордеров с биржей"""
+    async def sync_orders_from_exchange(self, max_get_order: Optional[int] = None):
+        """Синхронизировать список ордеров с биржей.
+
+        open_orders — источник истины по «что открыто». Для пропавших с биржи id
+        не более max_get_order раз вызывается get_order; остальные обрабатываются
+        как исполнение по цене из памяти (как в check_orders), без шторма API.
+        """
         try:
             self._deduplicate_orders()
             exchange_orders = await self.ex.open_orders(self.symbol)
@@ -1545,8 +1550,25 @@ class TradingBot:
                 log.warning(
                     f"[SYNC] Found {len(missing_on_exchange)} orders in memory marked as 'open' but not on exchange: {[o.order_id for o in missing_on_exchange]}"
                 )
-                # Запрашиваем статус на бирже: если FILLED — обрабатываем как исполнение (создаём замену), иначе просто удалим
-                for order in missing_on_exchange:
+                if max_get_order is None:
+                    max_get_order = int(getattr(config, "SYNC_GET_ORDER_MAX_PER_CALL", 10))
+                # SELL раньше BUY; затем стабильный порядок по id
+                missing_sorted = sorted(missing_on_exchange, key=lambda o: (0 if o.side == "SELL" else 1, str(o.order_id)))
+                if max_get_order <= 0:
+                    for_get_order = []
+                    for_memory_fill = missing_sorted
+                else:
+                    for_get_order = missing_sorted[:max_get_order]
+                    for_memory_fill = missing_sorted[max_get_order:]
+                if for_memory_fill:
+                    log.info(
+                        "[SYNC] %s | %s order(s) use memory fill path (get_order cap=%s)",
+                        self._log_prefix(),
+                        len(for_memory_fill),
+                        max_get_order,
+                    )
+                # Запрашиваем статус на бирже (ограниченно): если FILLED — обрабатываем как исполнение
+                for order in for_get_order:
                     try:
                         order_info = await self.ex.get_order(self.symbol, order.order_id)
                         if not order_info:
@@ -1568,6 +1590,22 @@ class TradingBot:
                             log.info("[SYNC] %s | Order %s status on exchange: %s (will be removed)", self._log_prefix(), order.order_id, status_raw)
                     except Exception as e:
                         log.warning("[SYNC] %s | Failed to get order %s status: %s (will be removed)", self._log_prefix(), order.order_id, e)
+                # Без get_order: как check_orders — нет в open_orders → исполнение по цене из памяти
+                for order in for_memory_fill:
+                    try:
+                        order.status = "filled"
+                        order.executed_qty = order.qty
+                        exec_price = order.price
+                        log.info(
+                            "[SYNC] %s | Order %s (%s) not in open_orders — processing as fill (memory path)",
+                            self._log_prefix(), order.order_id, order.side,
+                        )
+                        if order.side == "BUY":
+                            await self.handle_buy_filled(order, exec_price)
+                        elif order.side == "SELL":
+                            await self.handle_sell_filled(order, exec_price)
+                    except Exception as e:
+                        log.warning("[SYNC] %s | Memory fill failed for order %s: %s", self._log_prefix(), order.order_id, e)
 
             # Удаляем только ордера, которых нет на бирже И которые были созданы более 3 секунд назад (не обработанные как FILLED выше остаются с status=open и будут удалены)
             self.orders = [

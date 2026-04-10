@@ -658,6 +658,47 @@ class TestTradingCycleIntegration:
             assert len(sell_calls) >= 1
 
     @pytest.mark.asyncio
+    async def test_sync_respects_get_order_cap_rest_memory_fill(self, temp_dirs, mock_exchange):
+        """При большом числе «пропавших» ордеров get_order вызывается не чаще SYNC_GET_ORDER_MAX_PER_CALL; остальные — memory path."""
+        state_dir, user_data_dir = temp_dirs
+        trades_dir = os.path.join(tempfile.gettempdir(), "trades_test_sync_cap")
+        os.makedirs(trades_dir, exist_ok=True)
+        # 12 ордеров есть в памяти как open, на бирже их нет
+        bot_orders = []
+        for i in range(12):
+            oid = str(100 + i)
+            o = Order(oid, "BUY", Decimal("2"), Decimal("1"), status="open")
+            o.created_at = 0
+            bot_orders.append(o)
+        mock_exchange.open_orders.return_value = []
+        get_order_ids = []
+
+        def get_order_sync(symbol, order_id):
+            get_order_ids.append(order_id)
+            return {"status": "CANCELED"}
+
+        mock_exchange.get_order = get_order_sync
+        mock_exchange.balance.side_effect = lambda a: Decimal("1000")
+        mock_exchange.available_balance.return_value = Decimal("1000")
+        with (
+            patch("trading_bot.config.STATE_DIR", state_dir),
+            patch("trading_bot.config.USER_DATA_DIR", user_data_dir),
+            patch("trading_bot.config.TRADES_DIR", trades_dir, create=True),
+            patch("trading_bot.config.SYNC_GET_ORDER_MAX_PER_CALL", 10),
+            patch("trading_bot.BingXSpot", return_value=mock_exchange),
+            patch("persistence.config.STATE_DIR", state_dir),
+            patch("persistence.config.USER_DATA_DIR", user_data_dir),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            bot = TradingBot(12345, "key", "secret", symbol="ETH-USDT")
+            bot.orders = bot_orders
+            bot.handle_buy_filled = AsyncMock()
+            await bot.sync_orders_from_exchange()
+            assert len(get_order_ids) == 10
+            assert set(get_order_ids) == {str(100 + i) for i in range(10)}
+            assert bot.handle_buy_filled.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_create_buy_after_sell_at_max_returns_false_no_place_limit(self, temp_dirs, mock_exchange):
         """При 61 BUY и 4 открытых SELL (лимит после SELL = 61) create_buy_after_sell возвращает False и не вызывает place_limit."""
         state_dir, user_data_dir = temp_dirs

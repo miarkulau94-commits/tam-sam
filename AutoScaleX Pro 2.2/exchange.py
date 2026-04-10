@@ -89,12 +89,27 @@ class CircuitBreaker:
             elif self.state == CircuitState.CLOSED:
                 self.failure_count = 0
     
+    @staticmethod
+    def _is_rate_limit_error(error_msg: str) -> bool:
+        """429 / лимит частоты — не считаем к открытию breaker (временная перегрузка квоты)."""
+        m = (error_msg or "").lower()
+        return (
+            "rate limit" in m
+            or "429" in m
+            or "too many requests" in m
+            or "frequency limit" in m
+            or "превышен лимит" in m
+        )
+
     def _on_failure(self, error_msg: str = ""):
         """Обработка ошибки"""
         if "Incorrect apiKey" in error_msg or "api key" in error_msg.lower():
             log.warning(f"API key error (not counted as circuit breaker failure): {error_msg}")
             return
-        
+        if self._is_rate_limit_error(error_msg):
+            log.warning("Rate limit error (not counted toward circuit breaker): %s", error_msg[:300])
+            return
+
         with self.lock:
             self.failure_count += 1
             self.last_failure_time = time.time()

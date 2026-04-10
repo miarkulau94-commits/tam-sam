@@ -60,6 +60,19 @@ class TestCircuitBreaker:
                 cb.call(api_key_fail)
         assert cb.state == CircuitState.CLOSED
 
+    def test_rate_limit_error_not_counted_toward_open(self):
+        """429 / rate limit не открывают circuit breaker."""
+        cb = CircuitBreaker(failure_threshold=3, timeout=60, success_threshold=2)
+
+        def rate_limit_fail():
+            raise RuntimeError("API BingX: превышен лимит запросов (rate limit) после 4 попыток.")
+
+        for _ in range(10):
+            with pytest.raises(RuntimeError):
+                cb.call(rate_limit_fail)
+        assert cb.state == CircuitState.CLOSED
+        assert cb.failure_count == 0
+
     def test_reset_closes_circuit(self):
         cb = CircuitBreaker(failure_threshold=2, timeout=60, success_threshold=2)
 

@@ -61,6 +61,7 @@ cp env.example .env
 - `ENCRYPTION_SECRET` — секрет для шифрования API ключей (обязательно, без него бот не запустится)
 - `TG_ADMIN_ID` — ваш Telegram ID для админки (число; пустое значение = 0)
 - `BINGX_API_KEY` и `BINGX_SECRET` — опционально, можно задать через бота
+- Опционально: `SYNC_GET_ORDER_MAX_PER_CALL` (по умолчанию 10) и `SYNC_BALANCE_MAX_GET_ORDER` (по умолчанию 3) — лимиты `get_order` при синхронизации ордеров с биржей; подробнее в `DEPLOY_VPS.md` и `ARCHITECTURE_AND_SCENARIOS.md` (§1.2)
 
 ## Запуск
 

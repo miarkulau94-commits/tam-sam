@@ -913,7 +913,7 @@ class TelegramBotManager:
 
             try:
                 if getattr(bot, "state", None) != BotState.STOPPED:
-                    await bot.sync_orders_from_exchange()
+                    await bot.sync_orders_from_exchange(max_get_order=config.SYNC_BALANCE_MAX_GET_ORDER)
             except Exception as sync_err:
                 log.debug("Balance: sync_orders_from_exchange skipped: %s", sync_err)
 

@@ -95,3 +95,8 @@ PROTECTION_THRESHOLD_0_75_PCT = 127  # шаг сетки 0.75%
 # Защита Profit Bank: не зачислять в profit_bank прибыль выше этой с одной SELL (защита от ошибочного/призрачного расчёта при пустых FIFO-позициях)
 # 9 USDT — при минимальных ордерах от 10 USDT нормальная прибыль с одной SELL всегда меньше
 PROFIT_BANK_MAX_PROFIT_PER_SELL = Decimal(os.getenv("PROFIT_BANK_MAX_PROFIT_PER_SELL", "9"))
+
+# Синхронизация ордеров: максимум запросов get_order за один sync (остальные — путь как в check_orders, без get_order)
+SYNC_GET_ORDER_MAX_PER_CALL = int(os.getenv("SYNC_GET_ORDER_MAX_PER_CALL", "10"))
+# Экран «Баланс» в Telegram: лимит get_order за один sync (меньше нагрузки при просмотре)
+SYNC_BALANCE_MAX_GET_ORDER = int(os.getenv("SYNC_BALANCE_MAX_GET_ORDER", "3"))

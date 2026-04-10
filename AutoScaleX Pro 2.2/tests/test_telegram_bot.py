@@ -630,6 +630,34 @@ class TestHandleBalance:
 
         mock_bot.load_state.assert_called_once_with(True)
 
+    async def test_balance_calls_sync_with_sync_balance_max_get_order(self):
+        """handle_balance вызывает sync_orders_from_exchange(max_get_order=config.SYNC_BALANCE_MAX_GET_ORDER)."""
+        mgr = TelegramBotManager()
+        query = AsyncMock()
+
+        mock_bot = MagicMock()
+        _mock_bot_for_balance(mock_bot)
+        mock_bot.initial_equity = Decimal("500")
+        mock_bot.profit_bank = Decimal("0")
+        mock_bot.quote_asset_name = "USDT"
+        mock_bot.base_asset_name = "DOT"
+        mock_bot.symbol = "DOT-USDT"
+        mock_bot.load_state = MagicMock()
+        mock_bot.save_state = MagicMock()
+        mock_bot.get_current_price = AsyncMock(return_value=Decimal("8"))
+        mock_bot.get_total_equity = AsyncMock(return_value=Decimal("600"))
+        mock_bot.ex = MagicMock()
+        mock_bot.ex.balance = AsyncMock(side_effect=[Decimal("200"), Decimal("50")])
+
+        with patch.object(mgr, "_get_user_uid", return_value="uid1"):
+            with patch.object(mgr, "_get_or_create_bot_for_user", return_value=mock_bot):
+                with patch("telegram_bot.asyncio.to_thread", new_callable=AsyncMock, side_effect=lambda fn, *a: fn(*a)):
+                    with patch("telegram_bot._safe_edit_message", new_callable=AsyncMock):
+                        with patch("telegram_bot.config.SYNC_BALANCE_MAX_GET_ORDER", 3):
+                            await mgr.handle_balance(query, 999)
+
+        mock_bot.sync_orders_from_exchange.assert_called_once_with(max_get_order=3)
+
     async def test_balance_profit_bank_from_state_same_as_pyramiding(self):
         """Profit Bank в «Баланс» — то же значение из state, что используется для пирамидинга."""
         mgr = TelegramBotManager()

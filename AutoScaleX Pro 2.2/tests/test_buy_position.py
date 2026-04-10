@@ -127,6 +127,37 @@ class TestPositionManager:
         assert profit < 0
         assert pm.get_total_qty() == Decimal("1")
 
+    def test_get_average_price_zero_total_qty(self):
+        """Позиции есть, суммарный qty=0 → VWAP 0 (защита от деления на ноль)."""
+        pm = PositionManager()
+        pm.positions.append(BuyPosition(Decimal("100"), Decimal("0")))
+        assert pm.get_average_price() == Decimal("0")
+
+    def test_restore_from_trades_skips_non_buy_sell(self):
+        n = PositionManager().restore_from_trades(
+            [{"type": "UNKNOWN", "price": "1", "qty": "1", "timestamp": "t"}],
+            Decimal("0"),
+        )
+        assert n == 0
+
+    def test_restore_from_trades_symbol_filter_no_match(self):
+        n = PositionManager().restore_from_trades(
+            [{"type": "BUY", "price": "1", "qty": "1", "timestamp": "t", "symbol": "A"}],
+            Decimal("0"),
+            symbol="B",
+        )
+        assert n == 0
+
+    def test_restore_from_trades_skips_bad_decimal_trade(self):
+        pm = PositionManager()
+        trades = [
+            {"type": "BUY", "price": "not_a_number", "qty": "1", "timestamp": "2025-01-01"},
+            {"type": "BUY", "price": "10", "qty": "1", "timestamp": "2025-01-02"},
+        ]
+        n = pm.restore_from_trades(trades, Decimal("0"))
+        assert n == 1
+        assert pm.get_total_qty() == Decimal("1")
+
     def test_restore_from_trades_returns_remaining_positions_count(self):
         """restore_from_trades возвращает количество оставшихся позиций после проигрывания истории."""
         pm = PositionManager()

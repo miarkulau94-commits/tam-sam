@@ -55,6 +55,24 @@ class TestOrder:
         with pytest.raises(KeyError, match="qty"):
             Order.from_dict({"order_id": "x", "price": "100"})
 
+    def test_from_dict_missing_order_id_raises(self):
+        import pytest
+
+        with pytest.raises(KeyError, match="order_id"):
+            Order.from_dict({"price": "100", "qty": "1"})
+
+    def test_from_dict_sell_derives_amount_usdt_when_zero(self):
+        o = Order.from_dict(
+            {
+                "order_id": "s1",
+                "side": "SELL",
+                "price": "200",
+                "qty": "0.25",
+                "amount_usdt": "0",
+            }
+        )
+        assert o.amount_usdt == Decimal("200") * Decimal("0.25")
+
     def test_from_dict_roundtrip(self):
         o = Order("r1", "SELL", Decimal("200"), Decimal("0.25"), status="filled")
         d = o.to_dict()

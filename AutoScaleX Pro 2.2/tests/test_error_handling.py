@@ -69,3 +69,16 @@ class TestGetUserFriendlyMessage:
     def test_timeout_error(self):
         msg = get_user_friendly_message(Exception("request timed out"))
         assert msg is not None
+
+    def test_critical_long_message_truncated_with_ellipsis(self):
+        """Ветка is_telegram_critical + обрезка до 200 символов (не api key / не timeout)."""
+        long_body = "x" * 250
+        err = Exception(f"Критическая ошибка: {long_body}")
+        msg = get_user_friendly_message(err)
+        assert msg is not None
+        assert msg.startswith("🚨 Ошибка:")
+        assert msg.endswith("...")
+        assert len(msg) < len(str(err)) + 20
+
+    def test_non_critical_returns_none(self):
+        assert get_user_friendly_message(Exception("Баланс обновлён, всё в порядке")) is None

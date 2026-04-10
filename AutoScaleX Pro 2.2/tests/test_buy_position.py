@@ -133,6 +133,22 @@ class TestPositionManager:
         pm.positions.append(BuyPosition(Decimal("100"), Decimal("0")))
         assert pm.get_average_price() == Decimal("0")
 
+    def test_get_average_price_empty_positions_returns_zero(self):
+        """Пустой список позиций → ранний return 0 (ветка if not self.positions)."""
+        assert PositionManager().get_average_price() == Decimal("0")
+
+    def test_restore_from_trades_skips_zero_price_or_qty(self):
+        """Строка 103: price<=0 или qty<=0 — continue, не добавляем позицию."""
+        pm = PositionManager()
+        trades = [
+            {"type": "BUY", "price": "0", "qty": "1", "timestamp": "t1"},
+            {"type": "BUY", "price": "10", "qty": "0", "timestamp": "t2"},
+            {"type": "BUY", "price": "5", "qty": "1", "timestamp": "t3"},
+        ]
+        n = pm.restore_from_trades(trades, Decimal("0"))
+        assert n == 1
+        assert pm.get_total_qty() == Decimal("1")
+
     def test_restore_from_trades_skips_non_buy_sell(self):
         n = PositionManager().restore_from_trades(
             [{"type": "UNKNOWN", "price": "1", "qty": "1", "timestamp": "t"}],

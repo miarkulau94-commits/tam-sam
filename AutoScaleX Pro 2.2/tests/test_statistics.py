@@ -142,3 +142,38 @@ class TestStatistics:
             s.save_trade({"type": "SELL", "symbol": "X", "price": "10", "qty": "1"})
         assert len(s.trades) == 1
         mock_p.add_trade.assert_called_once()
+
+    def test_save_to_json_oserror_logged(self):
+        _real_open = builtins.open
+
+        def open_stub(path, mode="r", *args, **kwargs):
+            if mode == "w" and str(path).endswith("fail.json"):
+                raise OSError("no space")
+            return _real_open(path, mode, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            json_file = os.path.join(d, "fail.json")
+            csv_file = os.path.join(d, "c.csv")
+            s = Statistics(csv_file=csv_file, json_file=json_file, uid=None, persistence=None)
+            with patch("builtins.open", open_stub):
+                s._save_to_json()
+
+    def test_clear_all_load_user_trades_oserror(self):
+        mock_p = MagicMock()
+        mock_p.load_user_trades.side_effect = OSError("cannot read")
+        with tempfile.TemporaryDirectory() as d:
+            csv_file = os.path.join(d, "x.csv")
+            json_file = os.path.join(d, "y.json")
+            s = Statistics(csv_file=csv_file, json_file=json_file, uid="u1", persistence=mock_p)
+            s.trades = [{"type": "BUY"}]
+            s.clear_all()
+
+    def test_save_trade_none_outer_typeerror(self, caplog):
+        import logging
+
+        with tempfile.TemporaryDirectory() as d:
+            csv_file = os.path.join(d, "z.csv")
+            s = Statistics(csv_file=csv_file, uid=None, persistence=None)
+            with caplog.at_level(logging.ERROR, logger="statistics"):
+                s.save_trade(None)  # type: ignore[arg-type]
+        assert "Error saving trade" in caplog.text

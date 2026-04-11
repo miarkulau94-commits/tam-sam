@@ -21,6 +21,18 @@
    - `TG_TOKEN`, `ENCRYPTION_SECRET` — обязательны для запуска бота.
    - Остальное — по необходимости (API ключи, `TG_ADMIN_ID` и т.д.).
 
+### Git hooks (корень репозитория git)
+
+Репозиторий на уровень выше папки `AutoScaleX Pro 2.2`. Один раз из **корня git** (где лежит `.git` и папка `.githooks`):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+На Linux/macOS при необходимости: `chmod +x .githooks/commit-msg .githooks/prepare-commit-msg`
+
+Хуки удаляют из текста коммита типичные строки атрибуции Cursor и блокируют коммит, если такие строки остались.
+
 ---
 
 ## Тесты

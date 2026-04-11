@@ -1,0 +1,13 @@
+#!/bin/sh
+# Блокирует коммит, если в сообщении остались строки атрибуции Cursor.
+# Подключение: из корня репозитория: git config core.hooksPath .githooks
+
+msgfile="$1"
+[ -n "$msgfile" ] && [ -f "$msgfile" ] || exit 0
+
+if grep -qiE 'Сделано с:.*Курсор|Сделано с Cursor|Co-authored-by:.*[Cc]ursor|Generated with Cursor' "$msgfile" 2>/dev/null; then
+	echo >&2 "Коммит отклонён: в сообщении не должно быть строк атрибуции Cursor"
+	echo >&2 "(например «Сделано с: Курсор», Co-authored-by: Cursor). Удалите их и повторите коммит."
+	exit 1
+fi
+exit 0

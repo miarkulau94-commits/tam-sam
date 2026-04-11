@@ -1,0 +1,14 @@
+#!/bin/sh
+# Удаляет из текста коммита типичные строки атрибуции Cursor (если клиент их подставил).
+# Подключение: из корня репозитория: git config core.hooksPath .githooks
+
+msgfile="$1"
+[ -n "$msgfile" ] && [ -f "$msgfile" ] || exit 0
+
+tmp="${msgfile}.hooks-tmp"
+if grep -qE 'Сделано с:.*Курсор|Сделано с Cursor|Co-authored-by:.*[Cc]ursor|Generated with Cursor' "$msgfile" 2>/dev/null; then
+	grep -vE 'Сделано с:.*Курсор|Сделано с Cursor|Co-authored-by:.*[Cc]ursor|Generated with Cursor' "$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
+else
+	rm -f "$tmp" 2>/dev/null
+fi
+exit 0

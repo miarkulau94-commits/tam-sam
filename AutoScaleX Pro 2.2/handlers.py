@@ -91,6 +91,19 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
                 f"[CREATE_SELL_AFTER_BUY] Qty calculation: btc_received={btc_received:.8f}, available={available_base_asset:.8f}, sell_qty={sell_qty:.8f} (hedge from fill, not capped by dust)"
             )
 
+            # Микро-нехватка free (округление step, часть базы в других SELL): урезаем qty до кратного step из available,
+            # если разрыв крошечный — иначе полный хедж не ставится из-за free на доли процента ниже.
+            if available_base_asset < sell_qty and step and step > 0:
+                qty_cap = (available_base_asset // step) * step
+                gap = sell_qty - qty_cap
+                micro_limit = max(step, sell_qty * Decimal("0.001"))
+                if qty_cap >= min_qty and gap <= micro_limit:
+                    log.info(
+                        f"[CREATE_SELL_AFTER_BUY] Micro shortage: free {available_base_asset:.8f} < hedge {sell_qty:.8f}; "
+                        f"using capped qty {qty_cap:.8f} (gap {gap:.8f} <= limit {micro_limit:.8f})"
+                    )
+                    sell_qty = qty_cap
+
             resolved_sell = bot.find_next_free_sell_price_up(price, tick)
             if resolved_sell is None:
                 log.warning("[CREATE_SELL_AFTER_BUY] FAILED: no free SELL level (grid + fallbacks)")

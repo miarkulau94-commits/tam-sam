@@ -1,16 +1,8 @@
 #!/bin/sh
-# Блокирует коммит, если в сообщении всё ещё есть атрибуция Cursor.
-# Подключение: из корня репозитория: git config core.hooksPath .githooks
-
-msgfile="$1"
-[ -n "$msgfile" ] && [ -f "$msgfile" ] || exit 0
-
-if grep -qF 'Сделано с: Курсор' "$msgfile" 2>/dev/null \
-	|| grep -qF 'Сделано с:Курсор' "$msgfile" 2>/dev/null \
-	|| grep -qF 'Сделано с : Курсор' "$msgfile" 2>/dev/null \
-	|| grep -qiE 'Co-authored-by:.*[Cc]ursor' "$msgfile" 2>/dev/null \
-	|| grep -qF 'Generated with Cursor' "$msgfile" 2>/dev/null; then
-	echo >&2 "Коммит отклонён: удалите из сообщения строки вроде «Сделано с: Курсор» и аналоги."
-	exit 1
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONUTF8=1
+if command -v python3 >/dev/null 2>&1; then
+	exec python3 "$ROOT/scripts/commit_policy.py" commit-msg "$1"
+else
+	exec python "$ROOT/scripts/commit_policy.py" commit-msg "$1"
 fi
-exit 0

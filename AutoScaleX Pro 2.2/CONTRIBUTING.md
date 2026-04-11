@@ -29,9 +29,9 @@
 git config core.hooksPath .githooks
 ```
 
-На Linux/macOS при необходимости: `chmod +x .githooks/commit-msg .githooks/prepare-commit-msg`
+На Linux/macOS: `chmod +x .githooks/pre-commit .githooks/commit-msg .githooks/prepare-commit-msg`
 
-Хуки убирают из текста коммита **`Сделано с: Курсор`** (и варианты без пробела у двоеточия), строки `Co-authored-by: … Cursor`, `Generated with Cursor`; при необходимости коммит блокируется, если запрещённый текст остался.
+Перед коммитом **`pre-commit`** проверяет индекс на запрещённые подписи стороннего IDE; **`prepare-commit-msg`** и **`commit-msg`** очищают и проверяют текст сообщения. Логика в **`scripts/commit_policy.py`** (без хранения имён IDE строками в репозитории).
 
 ---
 

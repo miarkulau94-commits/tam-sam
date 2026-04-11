@@ -1,0 +1,9 @@
+#!/bin/sh
+# Проверка индекса: в коммит не должны попадать запрещённые подписи IDE (см. scripts/commit_policy.py).
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONUTF8=1
+if command -v python3 >/dev/null 2>&1; then
+	exec python3 "$ROOT/scripts/commit_policy.py" pre-commit
+else
+	exec python "$ROOT/scripts/commit_policy.py" pre-commit
+fi

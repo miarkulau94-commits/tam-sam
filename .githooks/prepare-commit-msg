@@ -1,18 +1,8 @@
 #!/bin/sh
-# Убирает из сообщения коммита «Сделано с: Курсор» и аналоги (в т.ч. внутри строки).
-# Подключение: из корня репозитория: git config core.hooksPath .githooks
-
-msgfile="$1"
-[ -n "$msgfile" ] && [ -f "$msgfile" ] || exit 0
-
-tmp="${msgfile}.hooks-tmp"
-sed -e 's/Сделано с: Курсор//g' \
-	-e 's/Сделано с:Курсор//g' \
-	-e 's/Сделано с : Курсор//g' \
-	"$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
-
-# Отдельные строки целиком (англ. варианты)
-grep -vE '^[[:space:]]*Co-authored-by:.*[Cc]ursor[[:space:]]*$' "$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
-grep -vE '^[[:space:]]*Generated with Cursor[[:space:]]*$' "$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
-
-exit 0
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONUTF8=1
+if command -v python3 >/dev/null 2>&1; then
+	exec python3 "$ROOT/scripts/commit_policy.py" prepare-commit-msg "$1"
+else
+	exec python "$ROOT/scripts/commit_policy.py" prepare-commit-msg "$1"
+fi

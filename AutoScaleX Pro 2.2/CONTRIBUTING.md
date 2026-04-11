@@ -31,7 +31,7 @@ git config core.hooksPath .githooks
 
 На Linux/macOS при необходимости: `chmod +x .githooks/commit-msg .githooks/prepare-commit-msg`
 
-Хуки удаляют из текста коммита типичные строки атрибуции Cursor и блокируют коммит, если такие строки остались.
+Хуки убирают из текста коммита **`Сделано с: Курсор`** (и варианты без пробела у двоеточия), строки `Co-authored-by: … Cursor`, `Generated with Cursor`; при необходимости коммит блокируется, если запрещённый текст остался.
 
 ---
 

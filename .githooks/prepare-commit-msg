@@ -1,14 +1,18 @@
 #!/bin/sh
-# Удаляет из текста коммита типичные строки атрибуции Cursor (если клиент их подставил).
+# Убирает из сообщения коммита «Сделано с: Курсор» и аналоги (в т.ч. внутри строки).
 # Подключение: из корня репозитория: git config core.hooksPath .githooks
 
 msgfile="$1"
 [ -n "$msgfile" ] && [ -f "$msgfile" ] || exit 0
 
 tmp="${msgfile}.hooks-tmp"
-if grep -qE 'Сделано с:.*Курсор|Сделано с Cursor|Co-authored-by:.*[Cc]ursor|Generated with Cursor' "$msgfile" 2>/dev/null; then
-	grep -vE 'Сделано с:.*Курсор|Сделано с Cursor|Co-authored-by:.*[Cc]ursor|Generated with Cursor' "$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
-else
-	rm -f "$tmp" 2>/dev/null
-fi
+sed -e 's/Сделано с: Курсор//g' \
+	-e 's/Сделано с:Курсор//g' \
+	-e 's/Сделано с : Курсор//g' \
+	"$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
+
+# Отдельные строки целиком (англ. варианты)
+grep -vE '^[[:space:]]*Co-authored-by:.*[Cc]ursor[[:space:]]*$' "$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
+grep -vE '^[[:space:]]*Generated with Cursor[[:space:]]*$' "$msgfile" >"$tmp" && mv "$tmp" "$msgfile"
+
 exit 0

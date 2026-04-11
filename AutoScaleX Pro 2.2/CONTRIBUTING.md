@@ -54,6 +54,7 @@
 | Логика бота, сетка, пирамидинг | **`BOT_LOGIC.md`** |
 | Ребаланс по шагам | **`SELL_REBALANCING.md`** |
 | Защита сетки и флаг после рестарта | **`GRID_PROTECTION.md`** |
+| Свободный уровень сетки (якорь, `find_next_free_*`) | **`GRID_FREE_LEVELS.md`**, `tests/test_grid_free_levels.py` |
 | Приоритеты доработок | **`PRIORITIES.md`** |
 
 При изменении сценариев (ребаланс, 1 SELL → отмена 5 BUY, восстановление 5 BUY внизу) сверяйтесь с **ARCHITECTURE_AND_SCENARIOS.md** и при необходимости обновляйте его.
@@ -65,6 +66,7 @@
 - Параметры стратегии, пути, лимиты: **`config.py`** и переменные окружения (`.env`).
 - Константы сценариев (число отменяемых BUY, пороги защиты): в **`config.py`** (`REBALANCE_PREP_CANCEL_BUY_COUNT`, `PROTECTION_THRESHOLD_*`).
 - Синхронизация ордеров с биржей: **`SYNC_GET_ORDER_MAX_PER_CALL`**, **`SYNC_BALANCE_MAX_GET_ORDER`** (см. `DEPLOY_VPS.md`, `ARCHITECTURE_AND_SCENARIOS.md` §1.2).
+- Поиск свободного уровня после fill: **`GRID_FREE_MAX_STEPS`** (см. `GRID_FREE_LEVELS.md`, `config.py`).
 
 ---
 

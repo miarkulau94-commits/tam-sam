@@ -60,12 +60,14 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
 
-            sell_price = price * (Decimal("1") + bot.grid_step_pct)
+            first_sell = price * (Decimal("1") + bot.grid_step_pct)
             if tick > 0:
-                sell_price = (sell_price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+                first_sell = (first_sell / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
             else:
-                sell_price = (sell_price // tick) * tick
-            log.info(f"[CREATE_SELL_AFTER_BUY] Calculated SELL price: {price:.8f} * (1 + {bot.grid_step_pct:.6f}) = {sell_price:.8f}")
+                first_sell = (first_sell // tick) * tick
+            log.info(
+                f"[CREATE_SELL_AFTER_BUY] First grid SELL candidate: {price:.8f} * (1 + {bot.grid_step_pct:.6f}) = {first_sell:.8f}"
+            )
 
             await bot.ex.invalidate_balance_cache(bot.base_asset_name)
             await asyncio.sleep(0.35)
@@ -89,15 +91,19 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
                 f"[CREATE_SELL_AFTER_BUY] Qty calculation: btc_received={btc_received:.8f}, available={available_base_asset:.8f}, sell_qty={sell_qty:.8f} (hedge from fill, not capped by dust)"
             )
 
-            existing_sell = any(o.side == "SELL" and abs(o.price - sell_price) < tick and o.status == "open" for o in bot.orders)
-
-            if existing_sell:
-                log.warning(f"[CREATE_SELL_AFTER_BUY] SKIPPED: SELL order already exists at price {sell_price:.8f}")
+            resolved_sell = bot.find_next_free_sell_price_up(price, tick)
+            if resolved_sell is None:
+                log.warning("[CREATE_SELL_AFTER_BUY] FAILED: no free SELL level (grid + fallbacks)")
             elif sell_qty < min_qty:
                 log.warning(
                     f"[CREATE_SELL_AFTER_BUY] FAILED: SELL order qty too small: {sell_qty:.8f} < {min_qty:.8f} (min_qty), available_base={available_base_asset:.8f}, btc_received={btc_received:.8f}"
                 )
             else:
+                if resolved_sell != first_sell:
+                    log.info(
+                        f"[CREATE_SELL_AFTER_BUY] Next free SELL level: {resolved_sell:.8f} (first grid {first_sell:.8f})"
+                    )
+                sell_price = resolved_sell
                 sell_notional = sell_qty * sell_price
                 required_notional = bot.get_required_notional(min_notional)
                 log.info(

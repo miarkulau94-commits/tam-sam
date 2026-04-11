@@ -1061,15 +1061,19 @@ class TelegramBotManager:
                     InlineKeyboardButton("📏 Шаг сетки (1.5%)", callback_data="grid_step_150"),
                 ],
                 [
-                    InlineKeyboardButton("💵 Ордер 10 USDT", callback_data="order_value_10"),
-                    InlineKeyboardButton("💵 Ордер 20 USDT", callback_data="order_value_20"),
-                    InlineKeyboardButton("💵 Ордер 35 USDT", callback_data="order_value_35"),
-                    InlineKeyboardButton("💵 Ордер 50 USDT", callback_data="order_value_50"),
+                    InlineKeyboardButton("💵 10 USDT", callback_data="order_value_10"),
+                    InlineKeyboardButton("💵 20 USDT", callback_data="order_value_20"),
+                    InlineKeyboardButton("💵 35 USDT", callback_data="order_value_35"),
                 ],
                 [
-                    InlineKeyboardButton("💵 Ордер 75 USDT", callback_data="order_value_75"),
-                    InlineKeyboardButton("💵 Ордер 100 USDT", callback_data="order_value_100"),
-                    InlineKeyboardButton("💵 Ордер 250 USDT", callback_data="order_value_250"),
+                    InlineKeyboardButton("💵 50 USDT", callback_data="order_value_50"),
+                    InlineKeyboardButton("💵 75 USDT", callback_data="order_value_75"),
+                    InlineKeyboardButton("💵 100 USDT", callback_data="order_value_100"),
+                ],
+                [
+                    InlineKeyboardButton("💵 175 USDT", callback_data="order_value_175"),
+                    InlineKeyboardButton("💵 250 USDT", callback_data="order_value_250"),
+                    InlineKeyboardButton("💵 350 USDT", callback_data="order_value_350"),
                 ],
                 [
                     InlineKeyboardButton("🔨 Построить сетку", callback_data="build_grid"),

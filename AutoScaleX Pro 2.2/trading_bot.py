@@ -378,6 +378,78 @@ class TradingBot:
             return price
         return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
 
+    def _open_buy_at_tick(self, price: Decimal, tick: Decimal) -> bool:
+        """Есть ли открытый BUY на этом ценовом уровне (с учётом тика)."""
+        return any(o.side == "BUY" and o.status == "open" and abs(o.price - price) < tick for o in self.orders)
+
+    def _open_sell_at_tick(self, price: Decimal, tick: Decimal) -> bool:
+        """Есть ли открытый SELL на этом ценовом уровне (с учётом тика)."""
+        return any(o.side == "SELL" and o.status == "open" and abs(o.price - price) < tick for o in self.orders)
+
+    def _fallback_pcts_shorter_than_grid(self) -> List[Decimal]:
+        """Доли для «мелкого» отступа от якоря (строго меньше основного grid_step_pct)."""
+        g = self.grid_step_pct
+        if g is None or g <= 0:
+            return []
+        step_float = float(g)
+        if abs(step_float - 0.015) < 0.0001:
+            return list(config.GRID_FALLBACK_BUY_BELOW_ANCHOR_PCT_015)
+        if abs(step_float - 0.0075) < 0.0001:
+            return list(config.GRID_FALLBACK_BUY_BELOW_ANCHOR_PCT_0075)
+        return [x for x in config.GRID_FALLBACK_BELOW_ANCHOR_PCT_GENERIC if x < g]
+
+    def find_next_free_buy_price_down(self, anchor_price: Decimal, tick: Decimal) -> Optional[Decimal]:
+        """Свободный BUY ниже якоря (SELL / нижний BUY): сначала до GRID_FREE_MAX_STEPS по сетке, затем мелкие % от якоря."""
+        if self.grid_step_pct is None or self.grid_step_pct <= 0:
+            return None
+        g = self.grid_step_pct
+        max_steps = max(1, config.GRID_FREE_MAX_STEPS)
+        p = self._align_to_tick(anchor_price * (Decimal("1") - g), tick)
+        for _ in range(max_steps):
+            if not self._open_buy_at_tick(p, tick):
+                return p
+            nxt = self._align_to_tick(p * (Decimal("1") - g), tick)
+            if nxt >= p:
+                log.warning(f"[GRID] BUY down: price did not decrease (p={p}, nxt={nxt})")
+                break
+            if nxt <= 0:
+                break
+            p = nxt
+        for fb in self._fallback_pcts_shorter_than_grid():
+            cand = self._align_to_tick(anchor_price * (Decimal("1") - fb), tick)
+            if not self._open_buy_at_tick(cand, tick):
+                log.info(
+                    f"[GRID] BUY: free level via shallow fallback {fb * 100:.2f}% below anchor -> {cand:.8f}"
+                )
+                return cand
+        log.warning("[GRID] No free BUY level (grid steps + fallbacks exhausted)")
+        return None
+
+    def find_next_free_sell_price_up(self, anchor_price: Decimal, tick: Decimal) -> Optional[Decimal]:
+        """Свободный SELL выше якоря (BUY fill): сначала до GRID_FREE_MAX_STEPS по сетке, затем мелкие % от якоря."""
+        if self.grid_step_pct is None or self.grid_step_pct <= 0:
+            return None
+        g = self.grid_step_pct
+        max_steps = max(1, config.GRID_FREE_MAX_STEPS)
+        p = self._align_to_tick(anchor_price * (Decimal("1") + g), tick)
+        for _ in range(max_steps):
+            if not self._open_sell_at_tick(p, tick):
+                return p
+            nxt = self._align_to_tick(p * (Decimal("1") + g), tick)
+            if nxt <= p:
+                log.warning(f"[GRID] SELL up: price did not increase (p={p}, nxt={nxt})")
+                break
+            p = nxt
+        for fb in self._fallback_pcts_shorter_than_grid():
+            cand = self._align_to_tick(anchor_price * (Decimal("1") + fb), tick)
+            if not self._open_sell_at_tick(cand, tick):
+                log.info(
+                    f"[GRID] SELL: free level via shallow fallback {fb * 100:.2f}% above anchor -> {cand:.8f}"
+                )
+                return cand
+        log.warning("[GRID] No free SELL level (grid steps + fallbacks exhausted)")
+        return None
+
     async def calculate_active_buy_orders_count(self) -> int:
         """Рассчитать количество активных BUY ордеров
         Рассчитывается на основе баланса и прибыли, без фиксированного минимума
@@ -807,37 +879,21 @@ class TradingBot:
 
                 lowest_order = min(open_buy_orders, key=lambda x: x.price)
 
-                new_price = lowest_order.price * (Decimal("1") - self.grid_step_pct)
-
                 info = await self.ex.symbol_info(self.symbol)
                 step = info["stepSize"]
                 tick = info["tickSize"]
-                new_price = self._align_to_tick(new_price, tick)
-
-                # Защита от дубля: если на основной цене уже есть BUY — пробуем запасной шаг (1% при шаге 1.5%, 0.5% при 0.75%)
-                existing_buy = any(o.side == "BUY" and abs(o.price - new_price) < tick and o.status == "open" for o in self.orders)
-                if existing_buy:
-                    fallback_step_pct = None
-                    if self.grid_step_pct is not None:
-                        step_float = float(self.grid_step_pct)
-                        if abs(step_float - 0.015) < 0.0001:
-                            fallback_step_pct = Decimal("0.01")  # 1%
-                        elif abs(step_float - 0.0075) < 0.0001:
-                            fallback_step_pct = Decimal("0.005")  # 0.5%
-                    if fallback_step_pct is not None:
-                        fallback_price = self._align_to_tick(lowest_order.price * (Decimal("1") - fallback_step_pct), tick)
-                        existing_at_fallback = any(
-                            o.side == "BUY" and abs(o.price - fallback_price) < tick and o.status == "open" for o in self.orders
-                        )
-                        if not existing_at_fallback:
-                            log.info(
-                                f"[PYRAMIDING] BUY already at {new_price:.8f}, using fallback step {fallback_step_pct}: price={fallback_price:.8f}"
-                            )
-                            new_price = fallback_price
-                            existing_buy = False
-                    if existing_buy:
-                        log.debug(f"[PYRAMIDING] Skipping: BUY order already exists at price {new_price:.8f}")
-                        break
+                first_candidate = self._align_to_tick(
+                    lowest_order.price * (Decimal("1") - self.grid_step_pct), tick
+                )
+                resolved = self.find_next_free_buy_price_down(lowest_order.price, tick)
+                if resolved is None:
+                    log.warning("[PYRAMIDING] No free BUY level found (grid + fallbacks)")
+                    break
+                if resolved != first_candidate:
+                    log.info(
+                        f"[PYRAMIDING] Using free BUY level: {resolved:.8f} (first grid candidate {first_candidate:.8f})"
+                    )
+                new_price = resolved
 
                 qty = (self.buy_order_value / new_price).quantize(step, rounding=ROUND_DOWN)
 
@@ -937,32 +993,21 @@ class TradingBot:
             # Новый BUY на ~1.5% ниже SELL (мультипликативный шаг — ровные уровни в процентах)
             info = await self.ex.symbol_info(self.symbol)
             tick = info["tickSize"]
-            new_buy_price = sell_price * (Decimal("1") - self.grid_step_pct)
-            log.info(f"Calculated new BUY price after SELL (~1.5%% step): {sell_price:.8f} * (1 - {self.grid_step_pct:.4f}) = {new_buy_price:.8f}")
-
-            existing_buy = any(o.side == "BUY" and abs(o.price - new_buy_price) < tick and o.status == "open" for o in self.orders)
-            if existing_buy:
-                fallback_step_pct = None
-                if self.grid_step_pct is not None:
-                    step_float = float(self.grid_step_pct)
-                    if abs(step_float - 0.015) < 0.0001:
-                        fallback_step_pct = Decimal("0.01")
-                    elif abs(step_float - 0.0075) < 0.0001:
-                        fallback_step_pct = Decimal("0.005")
-                if fallback_step_pct is not None:
-                    fallback_price = sell_price * (Decimal("1") - fallback_step_pct)
-                    existing_at_fallback = any(
-                        o.side == "BUY" and abs(o.price - fallback_price) < tick and o.status == "open" for o in self.orders
-                    )
-                    if not existing_at_fallback:
-                        log.info(
-                            f"[CREATE_BUY_AFTER_SELL] BUY already at {new_buy_price:.8f}, using fallback step: {fallback_price:.8f}"
-                        )
-                        new_buy_price = fallback_price
-                        existing_buy = False
-                if existing_buy:
-                    log.warning(f"[CREATE_BUY_AFTER_SELL] SKIPPED: BUY order already exists at price {new_buy_price:.8f}")
-                    return False
+            first_buy = sell_price * (Decimal("1") - self.grid_step_pct)
+            first_buy = self._align_to_tick(first_buy, tick)
+            log.info(
+                f"Calculated first BUY candidate after SELL: {sell_price:.8f} * (1 - {self.grid_step_pct:.4f}) = {first_buy:.8f}"
+            )
+            new_buy_price = self.find_next_free_buy_price_down(sell_price, tick)
+            if new_buy_price is None:
+                log.warning(
+                    "[CREATE_BUY_AFTER_SELL] FAILED: no free BUY level (grid steps + shallow fallbacks exhausted)"
+                )
+                return False
+            if new_buy_price != first_buy:
+                log.info(
+                    f"[CREATE_BUY_AFTER_SELL] Next free BUY level: {new_buy_price:.8f} (first grid candidate {first_buy:.8f})"
+                )
 
             step = info["stepSize"]
             min_qty = info.get("minQty", Decimal("0.000001"))
@@ -1052,13 +1097,19 @@ class TradingBot:
             # Новый BUY на ~1.5% ниже исполненного (мультипликативный шаг)
             info = await self.ex.symbol_info(self.symbol)
             tick = info["tickSize"]
-            new_buy_price = executed_buy_price * (Decimal("1") - self.grid_step_pct)
-            log.info(f"Calculated new BUY price (~1.5%% step): {executed_buy_price:.8f} * (1 - {self.grid_step_pct:.4f}) = {new_buy_price:.8f}")
-
-            existing_buy = any(o.side == "BUY" and abs(o.price - new_buy_price) < tick and o.status == "open" for o in self.orders)
-            if existing_buy:
-                log.warning(f"BUY order already exists at price {new_buy_price:.8f}, skipping creation")
+            first_buy = executed_buy_price * (Decimal("1") - self.grid_step_pct)
+            first_buy = self._align_to_tick(first_buy, tick)
+            log.info(
+                f"Calculated first BUY candidate after BUY fill: {executed_buy_price:.8f} * (1 - {self.grid_step_pct:.4f}) = {first_buy:.8f}"
+            )
+            new_buy_price = self.find_next_free_buy_price_down(executed_buy_price, tick)
+            if new_buy_price is None:
+                log.warning("[create_buy_after_buy] No free BUY level (grid + fallbacks); abort")
                 return
+            if new_buy_price != first_buy:
+                log.info(
+                    f"[create_buy_after_buy] Next free BUY level: {new_buy_price:.8f} (first grid {first_buy:.8f})"
+                )
 
             step = info["stepSize"]
             min_qty = info.get("minQty", Decimal("0.000001"))
@@ -1116,25 +1167,25 @@ class TradingBot:
                 log.debug(f"Maximum SELL orders reached: {len(open_sell_orders)} >= {config.SELL_ORDERS_COUNT}")
                 return
 
-            # Рассчитываем цену нового SELL ордера: выше исполненного на шаг сетки
-            new_sell_price = executed_sell_price * (Decimal("1") + self.grid_step_pct)
-
-            # Проверяем, не создан ли уже ордер на этой цене
+            # Рассчитываем цену нового SELL: выше исполненного на шаг; при занятом уровне — следующий свободный шаг вверх
             info = await self.ex.symbol_info(self.symbol)
             tick = info["tickSize"]
             step = info["stepSize"]
-            existing_sell = any(o.side == "SELL" and abs(o.price - new_sell_price) < tick and o.status == "open" for o in self.orders)
-
-            if existing_sell:
-                log.debug(f"SELL order already exists at price {new_sell_price:.8f}")
+            first_sell = self._align_to_tick(
+                executed_sell_price * (Decimal("1") + self.grid_step_pct), tick
+            )
+            new_sell_price = self.find_next_free_sell_price_up(executed_sell_price, tick)
+            if new_sell_price is None:
+                log.warning("[create_sell_after_sell] No free SELL level (grid + fallbacks)")
                 return
+            if new_sell_price != first_sell:
+                log.info(
+                    f"[create_sell_after_sell] Next free SELL level: {new_sell_price:.8f} (first grid {first_sell:.8f})"
+                )
 
-            # Получаем информацию о символе
             min_qty = info.get("minQty", Decimal("0.000001"))
             min_notional = info.get("minNotional", Decimal("0"))
 
-            # Рассчитываем цену и проверяем количество
-            new_sell_price = self._align_to_tick(new_sell_price, tick)
             sell_qty = (sell_qty // step) * step  # Округляем до шага
 
             sell_notional = sell_qty * new_sell_price

@@ -96,6 +96,36 @@ PROTECTION_THRESHOLD_0_75_PCT = 127  # шаг сетки 0.75%
 # 9 USDT — при минимальных ордерах от 10 USDT нормальная прибыль с одной SELL всегда меньше
 PROFIT_BANK_MAX_PROFIT_PER_SELL = Decimal(os.getenv("PROFIT_BANK_MAX_PROFIT_PER_SELL", "9"))
 
+# --- Поиск свободного уровня после fill (гибрид: сетка + «мелкие» отступы от якоря) ---
+# Подробно: GRID_FREE_LEVELS.md
+# Сколько раз идти вниз/вверх строго по grid_step_pct, прежде чем пробовать мелкие % от якоря
+GRID_FREE_MAX_STEPS = int(os.getenv("GRID_FREE_MAX_STEPS", "5"))
+# Мелкие отступы от якорной цены (доля, не %): только fb < основного шага; после исчерпания GRID_FREE_MAX_STEPS
+GRID_FALLBACK_BUY_BELOW_ANCHOR_PCT_015 = [
+    Decimal("0.014"),
+    Decimal("0.0125"),
+    Decimal("0.01"),
+    Decimal("0.008"),
+    Decimal("0.005"),
+]
+GRID_FALLBACK_BUY_BELOW_ANCHOR_PCT_0075 = [
+    Decimal("0.006"),
+    Decimal("0.005"),
+    Decimal("0.004"),
+    Decimal("0.003"),
+]
+# Для произвольного шага сетки: перебираются только значения строго меньше grid_step_pct
+GRID_FALLBACK_BELOW_ANCHOR_PCT_GENERIC = [
+    Decimal("0.014"),
+    Decimal("0.0125"),
+    Decimal("0.01"),
+    Decimal("0.008"),
+    Decimal("0.006"),
+    Decimal("0.005"),
+    Decimal("0.004"),
+    Decimal("0.003"),
+]
+
 # Синхронизация ордеров: максимум запросов get_order за один sync (остальные — путь как в check_orders, без get_order)
 SYNC_GET_ORDER_MAX_PER_CALL = int(os.getenv("SYNC_GET_ORDER_MAX_PER_CALL", "10"))
 # Экран «Баланс» в Telegram: лимит get_order за один sync (меньше нагрузки при просмотре)

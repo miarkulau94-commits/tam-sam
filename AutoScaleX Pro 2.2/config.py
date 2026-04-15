@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # Загрузка .env: сначала общие, затем .env в папке скрипта (наивысший приоритет)
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv()  # cwd
-load_dotenv(os.path.join(_BASE_DIR, "..", ".env"))  # nrq
+load_dotenv(os.path.join(_BASE_DIR, "..", ".env"))  # корень репозитория (на уровень выше папки бота)
 load_dotenv(os.path.join(_BASE_DIR, ".env"))  # AutoScaleX Pro 2.2 — приоритет
 
 log = logging.getLogger("config")

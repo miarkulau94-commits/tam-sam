@@ -93,7 +93,6 @@ async def test_main_loop_trading_iteration_check_orders_then_sync_order(temp_dir
         bot.check_orders = AsyncMock()
         bot.sync_orders_from_exchange = AsyncMock()
         bot.check_critical_situation = AsyncMock()
-        bot.check_protection_add_five_buy_when_three_left = AsyncMock()
 
         with pytest.raises(asyncio.CancelledError):
             await bot.main_loop()
@@ -101,7 +100,6 @@ async def test_main_loop_trading_iteration_check_orders_then_sync_order(temp_dir
     bot.check_orders.assert_awaited_once()
     bot.sync_orders_from_exchange.assert_awaited_once()
     bot.check_critical_situation.assert_awaited_once()
-    bot.check_protection_add_five_buy_when_three_left.assert_awaited_once()
 
 
 @pytest.mark.asyncio

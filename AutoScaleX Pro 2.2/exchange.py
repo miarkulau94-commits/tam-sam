@@ -503,6 +503,14 @@ class BingXSpot:
             self._cache[key] = (Decimal(data[0]["lastPrice"]), time.time())
         return self._cache[key][0]
 
+    def get_spot_klines_v2(self, symbol: str, interval: str, limit: int = 50) -> Any:
+        """Свечи Spot API v2 (рынок). Используется для ATR хвоста сетки.
+
+        Возвращает сырой payload из API (список словарей или список списков) или None при ошибке.
+        """
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        return self._request("GET", "/openApi/spot/v2/market/kline", params)
+
     def balance(self, asset: str) -> Decimal:
         """Получить баланс актива (free + locked)"""
         key = ("balance", asset)
@@ -914,6 +922,9 @@ class BingXSpotAsync:
 
     async def get_order(self, symbol: str, order_id: str):
         return await asyncio.to_thread(self._sync.get_order, symbol, order_id)
+
+    async def get_spot_klines_v2(self, symbol: str, interval: str, limit: int = 50) -> Any:
+        return await asyncio.to_thread(self._sync.get_spot_klines_v2, symbol, interval, limit)
 
     async def _request(self, method: str, endpoint: str, params: dict = None):
         return await asyncio.to_thread(self._sync._request, method, endpoint, params)

@@ -1,5 +1,5 @@
 """
-Защита сетки и подготовка к ребалансу: отмена N BUY, добавление до 5 BUY внизу при 3 BUY.
+Подготовка к ребалансу и ручное расширение BUY-сетки вниз: отмена N BUY; создание до 5 BUY внизу (`create_buy_orders_at_bottom`) — из Telegram «Добавить Buy», ребаланса и восстановления после отмены.
 Логика вынесена из TradingBot (см. GRID_PROTECTION.md).
 """
 from __future__ import annotations
@@ -45,35 +45,6 @@ async def cancel_last_n_buy_orders(bot: "TradingBot", n: int) -> int:
         return canceled_count
     except Exception as e:
         log.error(f"[CANCEL_LAST_BUY] Error cancelling last BUY orders: {e}", exc_info=True)
-        return 0
-
-
-async def check_protection_add_five_buy_when_three_left(bot: "TradingBot") -> int:
-    """Защита: при ≤3 открытых BUY и большой сетке добавить до 5 BUY внизу. Порог: 1.5% → 62, 0.75% → 127."""
-    try:
-        open_buy = [o for o in bot.orders if o.side == "BUY" and o.status == "open"]
-        open_buy_count = len(open_buy)
-        if open_buy_count > 3:
-            return 0
-        total_open = len([o for o in bot.orders if o.status == "open"])
-        threshold = bot.get_min_open_orders_for_protection()
-        if total_open <= threshold:
-            log.debug(
-                "[PROTECTION_3_BUY] Skip: total_open=%s <= threshold=%s",
-                total_open,
-                threshold,
-            )
-            return 0
-        current_price = await bot.get_current_price()
-        log.info(
-            "[PROTECTION_3_BUY] open_buy=%s, total_open=%s > threshold=%s -> adding up to 5 BUY at bottom",
-            open_buy_count,
-            total_open,
-            threshold,
-        )
-        return await create_buy_orders_at_bottom(bot, current_price)
-    except Exception as e:
-        log.error("[PROTECTION_3_BUY] Error: %s", e, exc_info=True)
         return 0
 
 

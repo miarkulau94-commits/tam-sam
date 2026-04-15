@@ -8,6 +8,7 @@ import asyncio
 import logging
 from decimal import Decimal
 
+import tail_grid
 from grid_protection import create_buy_orders_at_bottom
 
 log = logging.getLogger("rebalance")
@@ -203,9 +204,19 @@ async def check_rebalancing_after_all_buy_filled(bot: "TradingBot", current_pric
             vwap = await bot.calculate_vwap()
 
             if vwap > 0:
+                # ТЗ п.2 / п.9: open_SELL после данных биржи (здесь exchange_orders уже получены)
+                open_sell_ex = len([o for o in exchange_orders if o.get("side") == "SELL"])
+                if tail_grid.should_block_auto_vwap(open_sell_ex, bot.grid_step_pct):
+                    log.info(
+                        "[REBALANCING_AFTER_BUY] Skip auto VWAP SELL grid: open SELL(exchange)=%s >= tail threshold (grid step %s%%)",
+                        open_sell_ex,
+                        bot.grid_step_pct * 100 if bot.grid_step_pct else 0,
+                    )
+                    return
+
                 log.info(f"[REBALANCING_AFTER_BUY] All BUY orders executed. VWAP: {vwap:.8f}. Creating SELL grid from VWAP")
 
-                result = await bot.create_critical_sell_grid()
+                result = await bot.create_critical_sell_grid(vwap_source="auto_after_all_buy")
 
                 if result["created_count"] > 0:
                     log.info(f"🟥 [REBALANCING_AFTER_BUY] ✅ Successfully created {result['created_count']} SELL orders from VWAP {vwap:.8f}")

@@ -1,5 +1,5 @@
 """
-Unit-тесты для модулей grid_protection и rebalance (отмена BUY, защита по порогам, ребаланс).
+Unit-тесты для модулей grid_protection и rebalance (отмена BUY, create_buy_orders_at_bottom, ребаланс).
 """
 
 import os
@@ -496,11 +496,12 @@ class TestCheckRebalancingAfterAllBuyFilled:
         bot.state = BotState.TRADING
         bot.symbol = "ETH-USDT"
         bot.orders = []
+        bot.grid_step_pct = Decimal("0.015")
         bot.ex.open_orders = AsyncMock(return_value=[])
         bot.calculate_vwap = AsyncMock(return_value=Decimal("12.34"))
         bot.create_critical_sell_grid = AsyncMock(return_value={"created_count": 2})
         await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
-        bot.create_critical_sell_grid.assert_called_once()
+        bot.create_critical_sell_grid.assert_called_once_with(vwap_source="auto_after_all_buy")
 
     @pytest.mark.asyncio
     async def test_does_not_create_grid_when_vwap_zero(self):
@@ -509,6 +510,7 @@ class TestCheckRebalancingAfterAllBuyFilled:
         bot = MagicMock()
         bot.state = BotState.TRADING
         bot.orders = []
+        bot.grid_step_pct = Decimal("0.015")
         bot.ex.open_orders = AsyncMock(return_value=[])
         bot.calculate_vwap = AsyncMock(return_value=Decimal("0"))
         bot.create_critical_sell_grid = AsyncMock()
@@ -522,11 +524,12 @@ class TestCheckRebalancingAfterAllBuyFilled:
         bot = MagicMock()
         bot.state = BotState.TRADING
         bot.orders = []
+        bot.grid_step_pct = Decimal("0.015")
         bot.ex.open_orders = AsyncMock(return_value=[])
         bot.calculate_vwap = AsyncMock(return_value=Decimal("10"))
         bot.create_critical_sell_grid = AsyncMock(return_value={"created_count": 0})
         await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
-        bot.create_critical_sell_grid.assert_called_once()
+        bot.create_critical_sell_grid.assert_called_once_with(vwap_source="auto_after_all_buy")
 
     @pytest.mark.asyncio
     async def test_outer_exception_when_open_orders_fails(self):
@@ -538,3 +541,39 @@ class TestCheckRebalancingAfterAllBuyFilled:
         bot.ex.open_orders = AsyncMock(side_effect=OSError("unavailable"))
         await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
         bot.calculate_vwap.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_auto_vwap_when_exchange_sell_count_at_threshold(self):
+        """ТЗ п.9.1: при open_SELL ≥ 60 (1.5%) авто-VWAP не вызывается; счёт по exchange_orders."""
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.symbol = "ETH-USDT"
+        bot.orders = []
+        bot.grid_step_pct = Decimal("0.015")
+        bot.ex.open_orders = AsyncMock(
+            return_value=[{"side": "SELL", "orderId": str(i)} for i in range(60)]
+        )
+        bot.calculate_vwap = AsyncMock(return_value=Decimal("10"))
+        bot.create_critical_sell_grid = AsyncMock()
+        await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
+        bot.create_critical_sell_grid.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_auto_vwap_when_exchange_sell_count_at_threshold_075_tz_p13(self):
+        """ТЗ п.9.1 / п.13: при шаге 0.75% и open_SELL ≥ 120 авто-VWAP не вызывается."""
+        from trading_bot import BotState
+
+        bot = MagicMock()
+        bot.state = BotState.TRADING
+        bot.symbol = "ETH-USDT"
+        bot.orders = []
+        bot.grid_step_pct = Decimal("0.0075")
+        bot.ex.open_orders = AsyncMock(
+            return_value=[{"side": "SELL", "orderId": str(i)} for i in range(120)]
+        )
+        bot.calculate_vwap = AsyncMock(return_value=Decimal("10"))
+        bot.create_critical_sell_grid = AsyncMock()
+        await rebalance.check_rebalancing_after_all_buy_filled(bot, Decimal("1"))
+        bot.create_critical_sell_grid.assert_not_called()

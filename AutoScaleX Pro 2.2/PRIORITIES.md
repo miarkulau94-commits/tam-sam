@@ -8,7 +8,7 @@
 
 ### 1. Рефакторинг trading_bot.py (разбиение на модули) ✅
 
-**Сделано:** Обработка исполнений — **`handlers.py`** (`handle_buy_filled`, `handle_sell_filled`). Ребаланс — **`rebalance.py`** (`check_rebalancing`, `check_rebalancing_after_all_buy_filled`, `_rebalancing_apply_after_market_buy`). Защита сетки — **`grid_protection.py`** (`cancel_last_n_buy_orders`, `check_protection_add_five_buy_when_three_left`, `create_buy_orders_at_bottom`). В `trading_bot.py` остались обёртки, вызывающие эти модули. Все тесты проходят.
+**Сделано:** Обработка исполнений — **`handlers.py`** (`handle_buy_filled`, `handle_sell_filled`). Ребаланс — **`rebalance.py`** (`check_rebalancing`, `check_rebalancing_after_all_buy_filled`, `_rebalancing_apply_after_market_buy`). Сетка — **`grid_protection.py`** (`cancel_last_n_buy_orders`, `create_buy_orders_at_bottom`). В `trading_bot.py` остались обёртки, вызывающие эти модули. Все тесты проходят.
 
 ---
 
@@ -32,7 +32,7 @@
 
 ### 4. Вынос констант сценариев в config ✅
 
-**Сделано:** В `config.py` добавлены: **REBALANCE_PREP_CANCEL_BUY_COUNT = 5**, **PROTECTION_THRESHOLD_1_5_PCT = 62**, **PROTECTION_THRESHOLD_0_75_PCT = 127**. В `trading_bot.get_min_open_orders_for_protection()` и в `handlers.handle_sell_filled()` используются эти константы вместо литералов.
+**Сделано:** В `config.py` добавлен **REBALANCE_PREP_CANCEL_BUY_COUNT = 5** (число отменяемых самых низких BUY при подготовке к ребалансу).
 
 ---
 
@@ -48,7 +48,6 @@
 
 **Сделано:**
 
-- **Границы порогов защиты:** в `TestProtectionBoundaries` — при шаге 1.5% защита срабатывает при total_open > 62 (63), не срабатывает при 61; при 0.75% — срабатывает при 128, не срабатывает при 126.
 - **Полный цикл:** в `TestFullCycleIntegration` — SELL fill → отмена 5 BUY → флаг сохранён → load_state восстанавливает флаг; отдельно — check_rebalancing при 0 SELL вызывает market buy, rebuild_buy_grid_from_price и create_sell_grid_only (на моках).
 - **Модули grid_protection/rebalance:** в `tests/test_grid_protection_rebalance.py` — cancel_last_n_buy_orders (0 при нет BUY; отмена по самым низким ценам и удаление из orders), create_buy_orders_at_bottom при недостаточном балансе возвращает 0, check_rebalancing при STOPPED не вызывает place_market.
 

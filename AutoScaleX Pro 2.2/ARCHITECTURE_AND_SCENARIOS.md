@@ -1,8 +1,8 @@
 # Архитектура и сценарии (AutoScaleX Pro 2.2)
 
-Документ описывает высокоуровневую архитектуру бота и ключевые сценарии: ребаланс, подготовка к ребалансу (1 SELL → отмена 5 BUY), восстановление 5 BUY внизу после рестарта, защита сетки.
+Документ описывает высокоуровневую архитектуру бота и ключевые сценарии: ребаланс, подготовка к ребалансу (1 SELL → отмена 5 BUY), восстановление 5 BUY внизу после рестарта, ручное добавление BUY внизу из Telegram.
 
-Подробности по шагам и формулам — в `BOT_LOGIC.md`, `SELL_REBALANCING.md`, `GRID_PROTECTION.md`, `ORDER_EXECUTION_LOGIC.md`, `GRID_FREE_LEVELS.md` (свободный уровень при занятой цене).
+Подробности по шагам и формулам — в `BOT_LOGIC.md`, `SELL_REBALANCING.md`, `GRID_PROTECTION.md`, `ORDER_EXECUTION_LOGIC.md`, `GRID_FREE_LEVELS.md` (свободный уровень при занятой цене). **Хвост сетки (ATR), авто/ручной VWAP, пороги open SELL** — в `TAIL_GRID_AND_VWAP.md`.
 
 **Шаг сетки:** везде мультипликативный (~1.5% или 0.75% между уровнями). После исполнения BUY создаётся только SELL; после исполнения SELL — BUY снова на том же уровне (см. `ORDER_EXECUTION_LOGIC.md`, `BOT_LOGIC.md` §2.5).
 
@@ -27,7 +27,7 @@
 1. **check_orders()** — сравнение ордеров в памяти (status=open) с биржей; если ордера нет на бирже — считаем исполненным → **handle_buy_filled** или **handle_sell_filled**.
 2. **sync_orders_from_exchange()** — приведение списка ордеров в памяти в соответствие с биржей. Источник истины по «что открыто» — ответ **`open_orders`**. Для id, которые в памяти open, но отсутствуют в этом списке: не более **`SYNC_GET_ORDER_MAX_PER_CALL`** уточнений через **`get_order`** за один проход (сначала SELL, затем BUY); остальные обрабатываются как исполнение по цене из памяти (как в п.1). При открытии **«Баланс»** в Telegram используется **`SYNC_BALANCE_MAX_GET_ORDER`** вместо полного лимита.
 3. **check_critical_situation()** — все BUY исполнены, нет SELL, не хватает USDT на рыночную покупку.
-4. **check_protection_add_five_buy_when_three_left()** — защита «3 BUY → до 5 BUY внизу» при большой сетке.
+4. **maybe_process_tail_grid()** — отмена хвостовых BUY (если разрешено по числу open SELL) и попытка активации хвоста после полной базовой лестницы (ATR, kline v2 только для хвоста).
 
 Исполнение ордера обрабатывается в момент обнаружения в **check_orders**; отмена 5 BUY при 1 SELL выполняется внутри **handle_sell_filled**, а не в цикле.
 
@@ -37,6 +37,7 @@
 - `orders` — только открытые ордера (open).
 - `bot_state` — TRADING / PAUSED / STOPPED для авто-восстановления после рестарта.
 - **cancelled_buy_for_rebalance_prep** — флаг «отменили 5 BUY при 1 SELL»; после рестарта позволяет восстановить 5 BUY внизу, когда снова станет ≥3 SELL.
+- Поля **хвоста** и **базовой лестницы:** `tail_active`, `tail_order_ids`, `step_tail`, `tail_anchor_price`, `tail_activated_at`, `tail_activation_done`, `base_ladder_count`, `base_ladder_filled_indices`, `last_base_buy_fill_price`, `tail_antiflap_last_ts` — см. `TAIL_GRID_AND_VWAP.md`.
 
 ---
 
@@ -107,25 +108,27 @@
 
 ---
 
-### 2.4 Защита «3 BUY → добавить до 5 BUY внизу»
+### 2.4 Ручное «Добавить Buy» в Telegram
 
-**Триггер:** В основном цикле (TRADING): открытых BUY **≤ 3**, а общее число открытых ордеров (BUY + SELL) **больше порога**.
+**Триггер:** Пользователь нажимает кнопку в Telegram.
 
-**Пороги:**
+**Где:** обработчик Telegram → **create_buy_orders_at_bottom(current_price)** (реализация в `grid_protection.py`).
 
-- Шаг 1.5%: открытых ордеров > **62**
-- Шаг 0.75%: открытых ордеров > **127**
-
-**Где:** **check_protection_add_five_buy_when_three_left()** вызывается из главного цикла после sync и check_critical_situation.
-
-**Последовательность:**
-
-1. Условия: `open_buy_count ≤ 3`, `open_buy_count + open_sell_count > threshold`.
-2. **create_buy_orders_at_bottom(current_price)** — до 5 новых BUY ниже самой низкой текущей BUY-цены (с учётом лимита BUY и баланса USDT).
-
-**Зачем:** При большой сетке и малом числе оставшихся BUY сетка «висит» высоко; защита заранее растягивает её вниз и снижает риск быстрого перехода в ребаланс при падении цены.
+**Смысл:** до **5** новых BUY ниже самой низкой открытой BUY-цены (или от текущей цены, если открытых BUY нет), с учётом лимита сетки и доступного USDT — без автоматического вызова из `main_loop`.
 
 Подробно: `GRID_PROTECTION.md` (§1).
+
+---
+
+### 2.5 Хвост сетки (ATR) и сценарии VWAP
+
+**Хвост:** после полного исполнения всех **N** базовых BUY выставляются дополнительные лимитные BUY ниже основы (шаг из ATR по 4H, метка `tail`). Активация **не** отключается из‑за большого числа открытых SELL. Отмена хвоста — только при **open SELL ≤** порога (60/125 по шагу). Анти-дребезг перевключения: кулдаун после kline для хвоста / после отмены (по умолчанию 15 мин, `TAIL_ANTIFLAP_COOLDOWN_SEC`).
+
+**Авто-VWAP** (все открытые BUY исчезли): `check_rebalancing_after_all_buy_filled` → при переполненных open SELL **не** вызывает критическую SELL-сетку от VWAP; **ручной** ребаланс SELL из Telegram — без этого ограничения.
+
+**Классический ребаланс** (0 открытых SELL): `check_rebalancing` — пороги хвоста/VWAP к нему не применяются.
+
+Подробно: **`TAIL_GRID_AND_VWAP.md`**.
 
 ---
 
@@ -136,7 +139,10 @@
 | Ребаланс | 0 SELL | Рыночная покупка + 5 SELL + опционально 5 BUY внизу | Сброс **cancelled_buy_for_rebalance_prep** |
 | Подготовка к ребалансу | 1 SELL после SELL fill | Отмена 5 самых низких BUY | Установка **cancelled_buy_for_rebalance_prep = True**, сохранение в state |
 | Восстановление 5 BUY внизу | BUY fill + ≥3 SELL + флаг True | create_buy_orders_at_bottom | Сброс флага, сохранение в state |
-| Защита сетки | ≤3 BUY, большая сетка | create_buy_orders_at_bottom | Не использует флаг |
+| Добавить Buy (TG) | Кнопка в Telegram | create_buy_orders_at_bottom | Не использует флаг |
+| Хвост ATR | Полная база BUY + условия в `try_activate_tail_grid` | kline v2, лимитные BUY с `is_tail` | state, `tail_antiflap_last_ts` |
+| Авто-VWAP | Нет open BUY, TRADING | `create_critical_sell_grid(auto_after_all_buy)` или skip по open SELL | — |
+| Ручной VWAP (TG) | Кнопка в Telegram | `create_critical_sell_grid(manual_telegram)` | Лог `[VWAP_GRID]` |
 
 ---
 
@@ -145,8 +151,9 @@
 - **BOT_LOGIC.md** — общая логика, инициализация, сетка, пирамидинг, ребаланс, критические ситуации.
 - **ORDER_EXECUTION_LOGIC.md** — порядок вызовов, обнаружение исполнений, handle_buy_filled / handle_sell_filled, sync.
 - **SELL_REBALANCING.md** — детали ребаланса: формула покупки, создание 5 SELL, примеры.
-- **GRID_PROTECTION.md** — защита «3 BUY → 5 BUY внизу», отмена 5 BUY при 1 SELL, ссылка на поиск свободного уровня, сохранение флага и поведение после рестарта.
+- **GRID_PROTECTION.md** — ручное добавление BUY внизу (`create_buy_orders_at_bottom`), отмена 5 BUY при 1 SELL, ссылка на поиск свободного уровня, сохранение флага и поведение после рестарта.
 - **GRID_FREE_LEVELS.md** — якорь, гибрид «сетка + мелкие отступы», `GRID_FREE_MAX_STEPS`, где вызывается в коде.
+- **TAIL_GRID_AND_VWAP.md** — хвост сетки (ATR), отмена, авто/ручной VWAP, классический ребаланс, логи `[VWAP_GRID]`, переменные окружения.
 
 ---
 

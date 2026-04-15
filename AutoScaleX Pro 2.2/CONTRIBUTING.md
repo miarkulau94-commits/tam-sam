@@ -57,7 +57,7 @@ git config core.hooksPath .githooks
 |-------------|------------------|
 | Обработка исполнения BUY/SELL | `handlers.py` |
 | Ребаланс (все SELL закрыты → market buy, перестроение BUY/SELL) | `rebalance.py` |
-| Защита сетки: отмена N BUY, добавление до 5 BUY внизу при 3 BUY | `grid_protection.py` |
+| Сетка: отмена N BUY, `create_buy_orders_at_bottom` (Telegram «Добавить Buy», ребаланс) | `grid_protection.py` |
 | Оркестрация, state, вызов rebalance/grid_protection | `trading_bot.py` |
 | Запросы к BingX, лимитер, ретраи, circuit breaker (rate limit не открывает breaker) | `exchange.py` |
 | Синхронизация ордеров (`sync_orders_from_exchange`), лимит `get_order` | `trading_bot.py` |
@@ -65,18 +65,19 @@ git config core.hooksPath .githooks
 | Сценарии и архитектура | **`ARCHITECTURE_AND_SCENARIOS.md`** |
 | Логика бота, сетка, пирамидинг | **`BOT_LOGIC.md`** |
 | Ребаланс по шагам | **`SELL_REBALANCING.md`** |
-| Защита сетки и флаг после рестарта | **`GRID_PROTECTION.md`** |
+| Хвост сетки (ATR), авто/ручной VWAP, пороги open SELL | **`TAIL_GRID_AND_VWAP.md`** |
+| Сетка внизу, подготовка к ребалансу, флаг после рестарта | **`GRID_PROTECTION.md`** |
 | Свободный уровень сетки (якорь, `find_next_free_*`) | **`GRID_FREE_LEVELS.md`**, `tests/test_grid_free_levels.py` |
 | Приоритеты доработок | **`PRIORITIES.md`** |
 
-При изменении сценариев (ребаланс, 1 SELL → отмена 5 BUY, восстановление 5 BUY внизу) сверяйтесь с **ARCHITECTURE_AND_SCENARIOS.md** и при необходимости обновляйте его.
+При изменении сценариев (ребаланс, 1 SELL → отмена 5 BUY, восстановление 5 BUY внизу, хвост/VWAP) сверяйтесь с **ARCHITECTURE_AND_SCENARIOS.md** и **TAIL_GRID_AND_VWAP.md** и при необходимости обновляйте их.
 
 ---
 
 ## Конфиг и константы
 
 - Параметры стратегии, пути, лимиты: **`config.py`** и переменные окружения (`.env`).
-- Константы сценариев (число отменяемых BUY, пороги защиты): в **`config.py`** (`REBALANCE_PREP_CANCEL_BUY_COUNT`, `PROTECTION_THRESHOLD_*`).
+- Константы сценариев (число отменяемых BUY при подготовке к ребалансу): в **`config.py`** (`REBALANCE_PREP_CANCEL_BUY_COUNT`).
 - Синхронизация ордеров с биржей: **`SYNC_GET_ORDER_MAX_PER_CALL`**, **`SYNC_BALANCE_MAX_GET_ORDER`** (см. `DEPLOY_VPS.md`, `ARCHITECTURE_AND_SCENARIOS.md` §1.2).
 - Поиск свободного уровня после fill: **`GRID_FREE_MAX_STEPS`** (см. `GRID_FREE_LEVELS.md`, `config.py`).
 

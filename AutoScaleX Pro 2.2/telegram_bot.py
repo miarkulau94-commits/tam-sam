@@ -1331,8 +1331,8 @@ class TelegramBotManager:
         await query.edit_message_text("🔄 Ребалансировка SELL сетки от VWAP...")
 
         try:
-            result = await bot.create_critical_sell_grid()
-            log.info(f"[REBALANCE_SELL] Rebalancing completed: {result}")
+            result = await bot.create_critical_sell_grid(vwap_source="manual_telegram")
+            log.info(f"[REBALANCE_SELL] Rebalancing completed (manual VWAP / Telegram): {result}")
 
             keyboard = self._get_back_keyboard()
 

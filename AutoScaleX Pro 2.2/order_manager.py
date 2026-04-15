@@ -4,7 +4,7 @@
 import logging
 import time
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import config
 
@@ -22,6 +22,9 @@ class Order:
         qty: Decimal,
         status: str = "open",
         amount_usdt: Optional[Decimal] = None,
+        *,
+        is_tail: bool = False,
+        base_ladder_index: Optional[int] = None,
     ) -> None:
         self.order_id = order_id
         self.side = side.upper()
@@ -33,10 +36,12 @@ class Order:
             price * qty if self.side == "SELL" else config.BUY_ORDER_VALUE
         )
         self.created_at = time.time()
+        self.is_tail = bool(is_tail)
+        self.base_ladder_index = base_ladder_index
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> Dict[str, Any]:
         """Преобразовать в словарь для сохранения."""
-        return {
+        d: Dict[str, Any] = {
             "order_id": self.order_id,
             "side": self.side,
             "price": str(self.price),
@@ -45,6 +50,11 @@ class Order:
             "executed_qty": str(self.executed_qty),
             "amount_usdt": str(self.amount_usdt),
         }
+        if self.is_tail:
+            d["is_tail"] = True
+        if self.base_ladder_index is not None:
+            d["base_ladder_index"] = self.base_ladder_index
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Order":
@@ -60,6 +70,8 @@ class Order:
         amount_usdt = Decimal(amount_usdt_raw) if amount_usdt_raw else Decimal("0")
         if side == "SELL" and amount_usdt == 0 and price > 0 and qty > 0:
             amount_usdt = price * qty
+        bl_raw = data.get("base_ladder_index")
+        base_ladder_index = int(bl_raw) if bl_raw is not None else None
         order = cls(
             order_id=data["order_id"],
             side=side,
@@ -67,6 +79,8 @@ class Order:
             qty=qty,
             status=data.get("status", "open"),
             amount_usdt=amount_usdt,
+            is_tail=bool(data.get("is_tail", False)),
+            base_ladder_index=base_ladder_index,
         )
         order.executed_qty = Decimal(data.get("executed_qty", "0"))
         order.created_at = data.get("created_at", 0)

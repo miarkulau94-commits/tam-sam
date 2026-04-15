@@ -39,6 +39,10 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
         order.status = "filled"
         order.executed_qty = order.qty
 
+        if order.base_ladder_index is not None:
+            bot._base_ladder_filled_indices.add(order.base_ladder_index)
+            bot._last_base_buy_fill_price = price
+
         bot.statistics.save_trade(
             {
                 "type": "BUY",
@@ -161,6 +165,8 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
 
         log.info("[BUY FILL] Step 3: Checking rebalancing after BUY fill")
         await bot.check_rebalancing_after_all_buy_filled(price)
+
+        await bot.maybe_process_tail_grid(price)
 
         if len(open_sell_after) >= 3 and getattr(bot, "_cancelled_buy_for_rebalance_prep", False):
             log.info(

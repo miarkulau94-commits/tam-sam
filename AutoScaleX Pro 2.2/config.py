@@ -88,9 +88,18 @@ API_METRICS_ERROR_ALERT_THRESHOLD = int(os.getenv("API_METRICS_ERROR_ALERT_THRES
 # --- Константы сценариев (защита сетки, подготовка к ребалансу) ---
 # При 1 оставшемся SELL отменяем столько самых низких BUY, чтобы освободить USDT под рыночную покупку
 REBALANCE_PREP_CANCEL_BUY_COUNT = 5
-# Порог открытых ордеров для защиты «3 BUY → добавить до 5 BUY внизу»: только при «большой» сетке
-PROTECTION_THRESHOLD_1_5_PCT = 62   # шаг сетки 1.5%
-PROTECTION_THRESHOLD_0_75_PCT = 127  # шаг сетки 0.75%
+
+# --- Хвост сетки (ATR 4H): только для включения/перевключения хвоста ---
+TAIL_ATR_PERIOD = int(os.getenv("TAIL_ATR_PERIOD", "14"))
+TAIL_ATR_INTERVAL = os.getenv("TAIL_ATR_INTERVAL", "4h")  # BingX kline interval
+TAIL_ATR_KLINE_LIMIT = int(os.getenv("TAIL_ATR_KLINE_LIMIT", "50"))  # свечей для расчёта (≥ period+1)
+TAIL_ATR_MULTIPLIER_K = Decimal(os.getenv("TAIL_ATR_MULTIPLIER_K", "0.5"))
+TAIL_MAX_ORDERS = int(os.getenv("TAIL_MAX_ORDERS", "30"))
+# Пороги open SELL: авто-VWAP не глушить ниже этого; отмена хвоста только при open_SELL ≤ порога
+TAIL_OPEN_SELL_THRESHOLD_1_5_PCT = int(os.getenv("TAIL_OPEN_SELL_THRESHOLD_1_5_PCT", "60"))
+TAIL_OPEN_SELL_THRESHOLD_0_75_PCT = int(os.getenv("TAIL_OPEN_SELL_THRESHOLD_0_75_PCT", "120"))
+# ТЗ п.4.6: анти-дребезг — после отмены хвоста или после запроса kline для хвоста не чаще чем раз в N секунд (0 = выкл.)
+TAIL_ANTIFLAP_COOLDOWN_SEC = int(os.getenv("TAIL_ANTIFLAP_COOLDOWN_SEC", str(15 * 60)))
 
 # Защита Profit Bank: не зачислять в profit_bank прибыль выше этой с одной SELL (защита от ошибочного/призрачного расчёта при пустых FIFO-позициях)
 # 9 USDT — при минимальных ордерах от 10 USDT нормальная прибыль с одной SELL всегда меньше

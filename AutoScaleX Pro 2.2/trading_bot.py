@@ -12,11 +12,11 @@ from statistics import Statistics
 from typing import Any, Dict, List, Optional
 
 import config
+import tail_grid
 from buy_position import PositionManager
 from exchange import BingXSpot, BingXSpotAsync
 from grid_protection import (
     cancel_last_n_buy_orders as gp_cancel_last_n_buy_orders,
-    check_protection_add_five_buy_when_three_left as gp_check_protection,
     create_buy_orders_at_bottom as gp_create_buy_orders_at_bottom,
 )
 from handlers import handle_buy_filled as handle_buy_filled_impl, handle_sell_filled as handle_sell_filled_impl
@@ -73,6 +73,21 @@ class TradingBot:
 
         # Флаг: отменили 5 BUY для подготовки ребаланса (1 SELL остался), но цена пошла вниз
         self._cancelled_buy_for_rebalance_prep = False
+
+        # Хвост сетки (базовая лестница BUY + ATR-хвост)
+        self._base_ladder_filled_indices: set = set()
+        self._base_ladder_count = 0
+        self._tail_activation_done = False
+        # Персистентное состояние хвоста (согласованность после рестарта)
+        self.tail_active: bool = False
+        self.tail_order_ids: List[str] = []
+        self.step_tail: Optional[Decimal] = None  # зафиксированный шаг первого уровня волны
+        self.tail_anchor_price: Optional[Decimal] = None  # якорь при включении хвоста
+        self.tail_activated_at: Optional[float] = None  # unix time
+        # ТЗ: якорь — последний исполненный базовый BUY (обновляется в handlers)
+        self._last_base_buy_fill_price: Optional[Decimal] = None
+        # ТЗ п.4.6: время последнего события (отмена хвоста или kline для хвоста) — анти-дребезг перевключения
+        self._tail_antiflap_last_ts: Optional[float] = None
 
         # Статистика (инициализируем позже, после получения UID)
         self.initial_equity = Decimal("0")
@@ -227,6 +242,42 @@ class TradingBot:
                 # Флаг: отменили 5 BUY для ребаланса — после рестарта восстановление 5 BUY внизу работает
                 self._cancelled_buy_for_rebalance_prep = bool(state.get("cancelled_buy_for_rebalance_prep", False))
 
+                bl_raw = state.get("base_ladder_filled_indices") or []
+                self._base_ladder_filled_indices = set(int(x) for x in bl_raw) if bl_raw else set()
+                self._base_ladder_count = int(state.get("base_ladder_count", 0))
+                self._tail_activation_done = bool(state.get("tail_activation_done", False))
+
+                self.tail_active = bool(state.get("tail_active", False))
+                self.tail_order_ids = [str(x) for x in (state.get("tail_order_ids") or [])]
+                _st = state.get("step_tail")
+                self.step_tail = Decimal(str(_st)) if _st not in (None, "") else None
+                _ap = state.get("tail_anchor_price")
+                self.tail_anchor_price = Decimal(str(_ap)) if _ap not in (None, "") else None
+                _ta = state.get("tail_activated_at")
+                if _ta is None or _ta == "":
+                    self.tail_activated_at = None
+                elif isinstance(_ta, (int, float)):
+                    self.tail_activated_at = float(_ta)
+                else:
+                    try:
+                        self.tail_activated_at = float(_ta)
+                    except (TypeError, ValueError):
+                        self.tail_activated_at = None
+
+                self._reconcile_tail_state_after_load()
+
+                lb = state.get("last_base_buy_fill_price")
+                self._last_base_buy_fill_price = Decimal(str(lb)) if lb not in (None, "") else None
+
+                _taf = state.get("tail_antiflap_last_ts")
+                if _taf is None or _taf == "":
+                    self._tail_antiflap_last_ts = None
+                else:
+                    try:
+                        self._tail_antiflap_last_ts = float(_taf)
+                    except (TypeError, ValueError):
+                        self._tail_antiflap_last_ts = None
+
                 log.info(f"State loaded for user {self.user_id}")
             else:
                 # Если state пустой, используем user_id как UID
@@ -258,6 +309,7 @@ class TradingBot:
         try:
             if self.profit_bank < 0:
                 self.profit_bank = Decimal("0")
+            self._sync_tail_fields_from_open_orders()
             # Проверяем grid_step_pct перед сохранением
             if self.grid_step_pct >= 1:
                 log.error(f"grid_step_pct >= 1 before save ({self.grid_step_pct}), fixing to {self.grid_step_pct / Decimal('100')}")
@@ -279,6 +331,20 @@ class TradingBot:
                 "orders": [o.to_dict() for o in self.orders if o.status == "open"],
                 "bot_state": int(self.state),  # TRADING=1, PAUSED=2, STOPPED=5 — для авто-восстановления при перезапуске
                 "cancelled_buy_for_rebalance_prep": getattr(self, "_cancelled_buy_for_rebalance_prep", False),
+                "base_ladder_filled_indices": sorted(self._base_ladder_filled_indices),
+                "base_ladder_count": self._base_ladder_count,
+                "tail_activation_done": getattr(self, "_tail_activation_done", False),
+                "tail_active": getattr(self, "tail_active", False),
+                "tail_order_ids": list(getattr(self, "tail_order_ids", []) or []),
+                "step_tail": str(self.step_tail) if getattr(self, "step_tail", None) is not None else "",
+                "tail_anchor_price": str(self.tail_anchor_price) if getattr(self, "tail_anchor_price", None) is not None else "",
+                "tail_activated_at": self.tail_activated_at,
+                "last_base_buy_fill_price": str(self._last_base_buy_fill_price)
+                if getattr(self, "_last_base_buy_fill_price", None) is not None
+                else "",
+                "tail_antiflap_last_ts": self._tail_antiflap_last_ts
+                if getattr(self, "_tail_antiflap_last_ts", None) is not None
+                else None,
             }
             log.debug(f"Saving state: grid_step_pct={self.grid_step_pct} ({self.grid_step_pct * 100:.2f}%), uid={self.uid}")
             self.persistence.save_state(self.user_id, state)
@@ -356,21 +422,224 @@ class TradingBot:
                 max_orders = int(125 - (step_pct - 0.0075) / 0.0075 * 65)
                 return max(60, min(125, max_orders))
 
-    def get_min_open_orders_for_protection(self) -> int:
-        """Минимальное число открытых ордеров, при котором срабатывает защита «3 BUY → добавить 5».
-        Только при «большой» сетке: 1.5% -> 62, 0.75% -> 127 (чтобы не растягивать маленькую сетку)."""
-        if self.grid_step_pct is None:
-            return 127
-        step_pct = float(self.grid_step_pct)
-        if abs(step_pct - 0.0075) < 0.0001:
-            return config.PROTECTION_THRESHOLD_0_75_PCT
-        if abs(step_pct - 0.015) < 0.0001:
-            return config.PROTECTION_THRESHOLD_1_5_PCT
-        if step_pct <= 0.0075:
-            return config.PROTECTION_THRESHOLD_0_75_PCT
-        if step_pct >= 0.015:
-            return config.PROTECTION_THRESHOLD_1_5_PCT
-        return int(config.PROTECTION_THRESHOLD_0_75_PCT - (step_pct - 0.0075) / 0.0075 * (config.PROTECTION_THRESHOLD_0_75_PCT - config.PROTECTION_THRESHOLD_1_5_PCT))
+    def _clear_tail_session_metadata(self) -> None:
+        """Сброс метаданных активной волны хвоста (отмена, новая сетка)."""
+        self.tail_active = False
+        self.tail_order_ids = []
+        self.step_tail = None
+        self.tail_anchor_price = None
+        self.tail_activated_at = None
+        self._tail_activation_done = False
+
+    def _sync_tail_fields_from_open_orders(self) -> None:
+        """Перед сохранением: актуальный список id хвостовых BUY; без открытого хвоста — сброс флагов."""
+        open_tail = [o for o in self.orders if o.side == "BUY" and o.status == "open" and o.is_tail]
+        self.tail_order_ids = [o.order_id for o in open_tail]
+        if open_tail:
+            self.tail_active = True
+            self._tail_activation_done = True
+        elif self.tail_active or self._tail_activation_done:
+            self._clear_tail_session_metadata()
+
+    def _reconcile_tail_state_after_load(self) -> None:
+        """После загрузки state: восстановить is_tail по сохранённым id, согласовать с ордерами."""
+        saved_ids = set(self.tail_order_ids or [])
+        for o in self.orders:
+            if o.side == "BUY" and o.status == "open" and o.order_id in saved_ids:
+                o.is_tail = True
+        open_tail = [o for o in self.orders if o.side == "BUY" and o.status == "open" and o.is_tail]
+        self.tail_order_ids = [o.order_id for o in open_tail]
+        if not open_tail:
+            self._clear_tail_session_metadata()
+        else:
+            self.tail_active = True
+            self._tail_activation_done = True
+
+    def _reset_tail_and_base_ladder_state(self) -> None:
+        """Новая сетка или перестройка BUY — сброс учёта базовой лестницы и хвоста."""
+        self._base_ladder_filled_indices = set()
+        self._base_ladder_count = 0
+        self._last_base_buy_fill_price = None
+        self._tail_antiflap_last_ts = None
+        self._clear_tail_session_metadata()
+
+    async def count_open_sell_orders_for_tail_rules(self) -> int:
+        """ТЗ п.2: open_SELL по данным бота после согласования с биржей — предпочитаем open_orders API."""
+        try:
+            raw = await self.ex.open_orders(self.symbol)
+            return len([o for o in raw if o.get("side") == "SELL"])
+        except Exception as e:
+            log.debug("[TAIL] open_orders SELL count: fallback memory (%s)", type(e).__name__)
+            return len([o for o in self.orders if o.side == "SELL" and o.status == "open"])
+
+    async def cancel_tail_buy_orders_if_allowed(self) -> None:
+        """Отменить хвостовые BUY при open SELL ≤ порога (анти-дребезг). ТЗ п.8.1: снизу вверх."""
+        tail_open = [o for o in self.orders if o.side == "BUY" and o.status == "open" and o.is_tail]
+        if not tail_open:
+            return
+        open_sell = await self.count_open_sell_orders_for_tail_rules()
+        thr = tail_grid.open_sell_threshold_for_grid_step(self.grid_step_pct)
+        if not tail_grid.should_allow_tail_cancel(open_sell, self.grid_step_pct):
+            log.info(
+                "[TAIL] Cancel tail skipped: open SELL=%s > threshold %s (anti-flap)",
+                open_sell,
+                thr,
+            )
+            return
+        tail_open = sorted(tail_open, key=lambda o: o.price)
+        for order in list(tail_open):
+            try:
+                await self.ex.cancel_order(self.symbol, order.order_id)
+                if order in self.orders:
+                    self.orders.remove(order)
+                log.info("[TAIL] Cancelled tail BUY order %s at %s", order.order_id, order.price)
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                log.warning("[TAIL] Failed to cancel tail BUY %s: %s", order.order_id, e)
+        self._clear_tail_session_metadata()
+        self._tail_antiflap_last_ts = time.time()
+        log.info("[TAIL] Tail BUY orders cancelled (open SELL <= threshold); anti-flap cooldown started")
+        if self.telegram_notifier:
+            try:
+                await self.telegram_notifier(
+                    "📉 **Хвост сетки**\n\nОтменены хвостовые BUY (условие по числу открытых SELL)."
+                )
+            except Exception:
+                pass
+        await asyncio.to_thread(self.save_state)
+
+    async def try_activate_tail_grid(self, current_price: Decimal) -> None:
+        """Хвост по ТЗ п.4: ATR(14) 4H, step_tail=round_tick(ATR×k), аддитивные уровни, якорь=последний базовый fill."""
+        if self._tail_activation_done:
+            return
+        if self._base_ladder_count <= 0:
+            return
+        needed = set(range(1, self._base_ladder_count + 1))
+        if not needed.issubset(self._base_ladder_filled_indices):
+            return
+        cd = int(getattr(config, "TAIL_ANTIFLAP_COOLDOWN_SEC", 0) or 0)
+        if cd > 0 and self._tail_antiflap_last_ts is not None:
+            elapsed = time.time() - self._tail_antiflap_last_ts
+            if elapsed < cd:
+                log.info(
+                    "[TAIL] Skip tail activation: anti-flap cooldown (%ss), %.0fs left since last cancel/kline",
+                    cd,
+                    cd - elapsed,
+                )
+                return
+        open_sell = await self.count_open_sell_orders_for_tail_rules()
+
+        raw = await self.ex.get_spot_klines_v2(self.symbol, config.TAIL_ATR_INTERVAL, config.TAIL_ATR_KLINE_LIMIT)
+        self._tail_antiflap_last_ts = time.time()
+        candles = tail_grid.normalize_klines_payload(raw)
+        candles = tail_grid.order_candles_chronologically(candles)
+        atr = tail_grid.compute_atr_wilder(candles, config.TAIL_ATR_PERIOD)
+        if atr is None or atr <= 0:
+            log.warning("[TAIL] ATR not computed, fallback шаг = grid_step_pct × цена")
+            atr = Decimal("0")
+
+        info = await self.ex.symbol_info(self.symbol)
+        step = info.get("stepSize", Decimal("0.000001"))
+        tick = info.get("tickSize", Decimal("0.01"))
+        min_qty = info.get("minQty", Decimal("0.000001"))
+        min_notional = info.get("minNotional", Decimal("0"))
+
+        anchor_ref = self._last_base_buy_fill_price if self._last_base_buy_fill_price is not None else current_price
+        fallback_dist = current_price * self.grid_step_pct
+        step_tail_price = tail_grid.step_tail_price_wilder(
+            atr, config.TAIL_ATR_MULTIPLIER_K, tick, fallback_dist
+        )
+        log.info(
+            "[TAIL] anchor=%s step_tail(price)=%s ATR=%s open_SELL=%s",
+            anchor_ref,
+            step_tail_price,
+            atr,
+            open_sell,
+        )
+
+        quote_avail = await self.ex.available_balance(self.quote_asset_name)
+        if self.buy_order_value is None or self.buy_order_value <= 0:
+            return
+        n_tail = min(config.TAIL_MAX_ORDERS, int(quote_avail // self.buy_order_value))
+        if n_tail <= 0:
+            log.info("[TAIL] N_tail=0 (available quote %s < order value)", quote_avail)
+            return
+
+        self.tail_order_ids = []
+        created = 0
+        current_buy_price = self._align_to_tick(anchor_ref - step_tail_price, tick)
+        for i in range(n_tail):
+            if current_buy_price <= 0 or current_buy_price < tick:
+                break
+            if current_buy_price < current_price * Decimal("0.05"):
+                log.warning("[TAIL] Tail BUY price too low, stopping")
+                break
+            balance = await self.ex.balance(self.quote_asset_name)
+            if balance < self.buy_order_value:
+                log.info("[TAIL] Insufficient quote balance for tail BUY")
+                break
+            qty = (self.buy_order_value / current_buy_price).quantize(step, rounding=ROUND_DOWN)
+            notional = qty * current_buy_price
+            required = self.get_required_notional(min_notional)
+            if qty < min_qty or notional < required:
+                log.debug("[TAIL] Skip level: qty/notional below minimum")
+                break
+            try:
+                result = await self.ex.place_limit(self.symbol, "BUY", qty, current_buy_price, delay=0.1, validate=True)
+                if result and result.get("orderId"):
+                    oid = str(result.get("orderId", ""))
+                    if created == 0:
+                        self.tail_anchor_price = anchor_ref
+                        self.step_tail = step_tail_price
+                        self.tail_activated_at = time.time()
+                    self.tail_order_ids.append(oid)
+                    self.orders.append(
+                        Order(
+                            order_id=oid,
+                            side="BUY",
+                            price=current_buy_price,
+                            qty=qty,
+                            amount_usdt=self.buy_order_value,
+                            is_tail=True,
+                        )
+                    )
+                    created += 1
+                    log.info("[TAIL] Placed tail BUY #%s/%s at %s qty=%s", created, n_tail, current_buy_price, qty)
+                    await asyncio.sleep(0.2)
+                    if i + 1 < n_tail:
+                        current_buy_price = self._align_to_tick(current_buy_price - step_tail_price, tick)
+                else:
+                    log.warning("[TAIL] place_limit returned no orderId at %s", current_buy_price)
+                    break
+            except Exception as e:
+                log.warning("[TAIL] Failed to place tail BUY at %s: %s", current_buy_price, e)
+                break
+
+        if created > 0:
+            self.tail_active = True
+            self._tail_activation_done = True
+            log.info("[TAIL] Activated tail grid: %s/%s BUY orders, step_tail=%s", created, n_tail, self.step_tail)
+            if self.telegram_notifier:
+                try:
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(self.tail_activated_at or time.time()))
+                    await self.telegram_notifier(
+                        f"📊 **Хвост сетки активирован**\n\n"
+                        f"Символ: **{self.symbol}**\n"
+                        f"k={config.TAIL_ATR_MULTIPLIER_K}, step_tail(price)={self.step_tail}\n"
+                        f"N_tail={created}, якорь={self.tail_anchor_price}\n"
+                        f"Время: {ts}"
+                    )
+                except Exception:
+                    pass
+            await asyncio.to_thread(self.save_state)
+
+    async def maybe_process_tail_grid(self, ref_price: Optional[Decimal] = None) -> None:
+        """Отмена хвоста по порогу SELL и попытка активации хвоста после базы."""
+        if self.state != BotState.TRADING:
+            return
+        price = ref_price if ref_price is not None else await self.get_current_price()
+        await self.cancel_tail_buy_orders_if_allowed()
+        await self.try_activate_tail_grid(price)
 
     def _align_to_tick(self, price: Decimal, tick: Decimal) -> Decimal:
         """Выравнивание цены до ближайшего тика (round to nearest)."""
@@ -586,6 +855,7 @@ class TradingBot:
             raise ValueError(f"Количество BUY ордеров должно быть больше 0: {buy_count}")
         current_buy_price = price * (Decimal("1") - self.grid_step_pct)
         created = 0
+        placed_idx = 0
         for i in range(buy_count):
             if current_buy_price < price * Decimal("0.1"):
                 log.warning(f"Buy price too low, stopping at order {i + 1}/{buy_count}")
@@ -605,14 +875,16 @@ class TradingBot:
                 try:
                     result = await self.ex.place_limit(self.symbol, "BUY", qty, level_price, delay=0.1, validate=True)
                     if result and result.get("orderId"):
+                        placed_idx += 1
                         self.orders.append(
                             Order(
                                 order_id=str(result.get("orderId", "")), side="BUY", price=level_price, qty=qty,
-                                amount_usdt=self.buy_order_value
+                                amount_usdt=self.buy_order_value,
+                                base_ladder_index=placed_idx,
                             )
                         )
                         created += 1
-                        log.info(f"🟩 Order {i + 1}: BUY placed at {level_price:.8f}, qty={qty:.8f}")
+                        log.info(f"🟩 Order {i + 1}: BUY placed at {level_price:.8f}, qty={qty:.8f} (base #{placed_idx})")
                         await asyncio.sleep(0.2)
                 except ValueError as ve:
                     err = str(ve)
@@ -629,6 +901,7 @@ class TradingBot:
                 except (OSError, RuntimeError) as e:
                     log.warning(f"Order {i + 1}: Failed to place BUY at {level_price}: {type(e).__name__}")
             current_buy_price = current_buy_price * (Decimal("1") - self.grid_step_pct)
+        self._base_ladder_count = placed_idx
         return created
 
     async def create_grid(self):
@@ -638,6 +911,7 @@ class TradingBot:
             await self.ex.cancel_all(self.symbol)
             await asyncio.sleep(2)
             self.orders.clear()
+            self._reset_tail_and_base_ladder_state()
 
             if self.buy_order_value is None or self.buy_order_value <= 0:
                 raise ValueError(f"Размер ордера должен быть больше 0. Текущее значение: {self.buy_order_value}")
@@ -689,8 +963,14 @@ class TradingBot:
             log.error(f"Failed to create grid: {type(e).__name__}")
             raise
 
-    async def create_critical_sell_grid(self):
+    async def create_critical_sell_grid(self, *, vwap_source: str = "auto"):
         """Создать критическую SELL сетку от VWAP (3 ордера)
+
+        vwap_source: откуда вызван сценарий — для логов ТЗ п.12:
+            manual_telegram — кнопка / Telegram;
+            auto_after_all_buy — rebalance.check_rebalancing_after_all_buy_filled;
+            critical_level — check_critical_level (депозит);
+            auto — устаревший вызов без явной метки.
 
         Returns:
             dict: Словарь с результатами:
@@ -701,6 +981,12 @@ class TradingBot:
         result = {"created_count": 0, "vwap": Decimal("0"), "orders_info": []}
 
         try:
+            log.info(
+                "[VWAP_GRID] source=%s symbol=%s tail_active=%s (critical SELL from VWAP)",
+                vwap_source,
+                self.symbol,
+                getattr(self, "tail_active", False),
+            )
             # Рассчитываем VWAP (среднюю цену покупки)
             self.vwap = await self.calculate_vwap()
             result["vwap"] = self.vwap
@@ -759,8 +1045,12 @@ class TradingBot:
             sell_qty_per_order = available_base_asset / Decimal(config.CRITICAL_SELL_DIVISIONS)
 
             log.info(
-                f"Creating {config.CRITICAL_SELL_DIVISIONS} SELL orders from VWAP {self.vwap:.8f} "
-                f"at +{', +'.join(str(p) for p in config.CRITICAL_SELL_PROFIT_PCT)}% above VWAP"
+                "[VWAP_GRID] source=%s | Creating %s SELL orders from VWAP %s "
+                "at +%s%% above VWAP",
+                vwap_source,
+                config.CRITICAL_SELL_DIVISIONS,
+                f"{self.vwap:.8f}",
+                ", +".join(str(p) for p in config.CRITICAL_SELL_PROFIT_PCT),
             )
 
             for i, profit_pct in enumerate(config.CRITICAL_SELL_PROFIT_PCT, 1):
@@ -809,10 +1099,16 @@ class TradingBot:
                     log.warning(f"SELL order {i}: Failed to place critical SELL at {level_price}: {type(e).__name__}")
 
             await asyncio.to_thread(self.save_state)
-            log.info(f"🟥 Critical sell grid: created {result['created_count']}/{config.CRITICAL_SELL_DIVISIONS} orders from VWAP {self.vwap:.8f}")
+            log.info(
+                "[VWAP_GRID] source=%s | Critical sell grid done: created %s/%s from VWAP %s",
+                vwap_source,
+                result["created_count"],
+                config.CRITICAL_SELL_DIVISIONS,
+                f"{self.vwap:.8f}",
+            )
 
         except (OSError, RuntimeError, ValueError) as e:
-            log.error(f"Failed to create critical sell grid: {type(e).__name__}")
+            log.error("[VWAP_GRID] source=%s | Failed to create critical sell grid: %s", vwap_source, type(e).__name__)
 
         return result
 
@@ -843,7 +1139,7 @@ class TradingBot:
             ):
                 self.deposit_requested = True
                 self.state = BotState.CRITICAL
-                await self.create_critical_sell_grid()
+                await self.create_critical_sell_grid(vwap_source="critical_level")
                 log.warning(f"Critical level reached! Executed BUY orders: {self.total_executed_buys}")
 
         except Exception as e:
@@ -1226,6 +1522,7 @@ class TradingBot:
         Используется при ребалансировке, когда все SELL ордера исполнены и цена выросла
         """
         try:
+            self._reset_tail_and_base_ladder_state()
             # Отменяем все существующие BUY ордера
             open_buy_orders = [o for o in self.orders if o.side == "BUY" and o.status == "open"]
             log.info(f"Rebuilding BUY grid: cancelling {len(open_buy_orders)} old BUY orders")
@@ -1257,6 +1554,7 @@ class TradingBot:
             # Создаем новые BUY ордера от текущей цены
             current_buy_price = price * (Decimal("1") - self.grid_step_pct)
             created_buy_orders = 0
+            placed_idx = 0
 
             for i in range(buy_count):
                 try:
@@ -1298,12 +1596,14 @@ class TradingBot:
                             log.debug(f"[REBUILD_BUY] Placing order {i + 1}/{buy_count} at {level_price:.8f}, qty={qty:.8f}")
                             result = await self.ex.place_limit(self.symbol, "BUY", qty, level_price, delay=0.1)
                             if result and result.get("orderId"):
+                                placed_idx += 1
                                 order = Order(
-                                    order_id=str(result.get("orderId", "")), side="BUY", price=level_price, qty=qty, amount_usdt=self.buy_order_value
+                                    order_id=str(result.get("orderId", "")), side="BUY", price=level_price, qty=qty, amount_usdt=self.buy_order_value,
+                                    base_ladder_index=placed_idx,
                                 )
                                 self.orders.append(order)
                                 created_buy_orders += 1
-                                log.info(f"🟩 [REBUILD_BUY] Order {i + 1}/{buy_count}: ✅ Placed at {level_price:.8f}, qty={qty:.8f}")
+                                log.info(f"🟩 [REBUILD_BUY] Order {i + 1}/{buy_count}: ✅ Placed at {level_price:.8f}, qty={qty:.8f} (base #{placed_idx})")
                                 await asyncio.sleep(0.2)
                             else:
                                 log.warning(f"[REBUILD_BUY] Order {i + 1}: API returned no orderId: {result}")
@@ -1325,6 +1625,7 @@ class TradingBot:
                     log.error(f"[REBUILD_BUY] Unexpected error at order {i + 1}: {e}", exc_info=True)
                     # Продолжаем, не прерываем весь процесс
 
+            self._base_ladder_count = placed_idx
             log.info(f"🟩 [REBUILD_BUY] ✅ BUY grid rebuilt: {created_buy_orders}/{buy_count} orders created from price {price:.8f}")
 
         except Exception as e:
@@ -1493,10 +1794,6 @@ class TradingBot:
     async def cancel_last_n_buy_orders(self, n: int) -> int:
         """Отменить последние N BUY ордеров (реализация в grid_protection.py)."""
         return await gp_cancel_last_n_buy_orders(self, n)
-
-    async def check_protection_add_five_buy_when_three_left(self) -> int:
-        """Защита: при ≤3 BUY и большой сетке добавить до 5 BUY внизу (реализация в grid_protection.py)."""
-        return await gp_check_protection(self)
 
     async def create_buy_orders_at_bottom(self, current_price: Decimal) -> int:
         """Создать BUY ордера внизу сетки (реализация в grid_protection.py)."""
@@ -1921,8 +2218,7 @@ class TradingBot:
                     await self.sync_orders_from_exchange()
                     # Проверяем критическую ситуацию: все BUY исполнены, но SELL не созданы и рыночная покупка не сработала
                     await self.check_critical_situation()
-                    # Защита: при 3 открытых BUY и большой сетке — добавить до 5 BUY внизу (растянуть сетку, избежать rebalance sell на дне)
-                    await self.check_protection_add_five_buy_when_three_left()
+                    await self.maybe_process_tail_grid()
 
                 elif self.state == BotState.PAUSED:
                     pass

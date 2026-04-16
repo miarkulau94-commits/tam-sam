@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from referral_system import ReferralSystem
     from telegram_bot import (
+        _create_trading_bot,
+        _fetch_open_orders_on_exchange,
         _is_error_notification,
         _safe_edit_message,
         _is_success_or_info,
@@ -24,6 +26,8 @@ try:
     from trading_bot import BotState
 except ImportError:
     ReferralSystem = None
+    _create_trading_bot = None
+    _fetch_open_orders_on_exchange = None
     _is_error_notification = None
     _safe_edit_message = None
     _is_success_or_info = None
@@ -32,9 +36,28 @@ except ImportError:
     BotState = None
 
 pytestmark = pytest.mark.skipif(
-    _is_error_notification is None or _safe_edit_message is None,
+    _is_error_notification is None or _safe_edit_message is None or _fetch_open_orders_on_exchange is None,
     reason="telegram_bot module not available",
 )
+
+
+class TestFetchOpenOrdersHelper:
+    def test_returns_empty_list_on_exchange_error(self):
+        with patch("telegram_bot.BingXSpot", side_effect=RuntimeError("network")):
+            assert _fetch_open_orders_on_exchange("k", "s", "BTC-USDT") == []
+
+    def test_non_list_response_normalized_to_empty(self):
+        mock_ex = MagicMock()
+        mock_ex.open_orders.return_value = {"not": "a list"}
+        with patch("telegram_bot.BingXSpot", return_value=mock_ex):
+            assert _fetch_open_orders_on_exchange("k", "s", "ETH-USDT") == []
+
+
+class TestCreateTradingBotHelper:
+    def test_delegates_to_trading_bot_constructor(self):
+        with patch("telegram_bot.TradingBot") as mock_tb:
+            _create_trading_bot(7, "ak", "sec", None, "SOL-USDT")
+            mock_tb.assert_called_once_with(7, "ak", "sec", None, "SOL-USDT")
 
 
 def _make_manager_with_temp_referrals():

@@ -58,7 +58,6 @@ class TestClearLogContext:
         clear_log_context()
         assert get_log_context() == {"user_id": "-", "symbol": "-", "order_id": "-"}
 
-
 class TestStructuredContextFilter:
     def test_filter_adds_context_fields_to_record(self):
         set_log_context(user_id=7, symbol="BNBUSDT", order_id="oid-1")

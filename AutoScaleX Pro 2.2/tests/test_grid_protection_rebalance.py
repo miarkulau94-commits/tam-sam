@@ -110,6 +110,227 @@ class TestGridProtectionCreateBuyAtBottom:
         # Минимальный BUY в bot_mock = 100, шаг 1.5% → первый новый уровень 100 * 0.985 = 98.5
         assert placed_price == Decimal("98.5")
 
+    @pytest.mark.asyncio
+    async def test_create_buy_at_bottom_no_existing_buy_uses_current_price_branch(self):
+        """Ветка «нет открытых BUY» — старт от current_price * (1 - step). Plain object (не MagicMock), чтобы orders не итерировался как mock."""
+        class _Bot:
+            pass
+
+        bot = _Bot()
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.base_asset_name = "ETH"
+        bot.grid_step_pct = Decimal("0.015")
+        bot.buy_order_value = Decimal("50")
+        bot.orders = []
+        bot.ex = MagicMock()
+        bot.ex.symbol_info = AsyncMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("0.0001"),
+                "minNotional": Decimal("0"),
+            }
+        )
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("1000"))
+        bot.ex.balance = AsyncMock(return_value=Decimal("1000"))
+        bot.ex.place_limit = AsyncMock(return_value={"orderId": "bottom_1"})
+
+        def _req(_min):
+            return Decimal("0")
+
+        bot.get_required_notional = _req
+        bot.get_max_buy_orders = lambda: 60
+
+        def _align_to_tick(price, tick):
+            if not tick or tick <= 0:
+                return price
+            return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
+        bot._align_to_tick = _align_to_tick
+        n = await grid_protection.create_buy_orders_at_bottom(bot, Decimal("200"))
+        assert n >= 1
+        # place_limit вызывается до 5 раз — берём первый вызов (первый уровень внизу)
+        first_price = bot.ex.place_limit.call_args_list[0][0][3]
+        tick = Decimal("0.01")
+        start = Decimal("200") * (Decimal("1") - Decimal("0.015"))
+        assert first_price == _align_to_tick(start, tick)
+
+    @pytest.mark.asyncio
+    async def test_create_buy_at_bottom_limit_reached_debug_return(self, bot_mock):
+        """len(open_buy) >= max_allowed_buy → возврат 0 без place_limit."""
+        bot_mock.orders = [Order(str(i), "BUY", Decimal("100"), Decimal("0.1"), status="open") for i in range(65)]
+        bot_mock.get_max_buy_orders = MagicMock(return_value=60)
+        n = await grid_protection.create_buy_orders_at_bottom(bot_mock, Decimal("100"))
+        assert n == 0
+        bot_mock.ex.place_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_last_n_outer_exception_returns_zero(self):
+        class BadBot:
+            symbol = "ETH-USDT"
+
+            def __init__(self):
+                self.ex = MagicMock()
+
+            @property
+            def orders(self):
+                raise RuntimeError("boom")
+
+        n = await grid_protection.cancel_last_n_buy_orders(BadBot(), 1)
+        assert n == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_last_n_single_order_failure_still_counts(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.orders = [Order("b1", "BUY", Decimal("50"), Decimal("0.1"), status="open")]
+        bot.ex = MagicMock()
+        bot.ex._request = AsyncMock(side_effect=RuntimeError("cancel failed"))
+        n = await grid_protection.cancel_last_n_buy_orders(bot, 1)
+        assert n == 0
+
+
+class TestGridProtectionCreateBuyValidation:
+    """Ветки цикла: низкая цена, ошибка place_limit, валидация qty, внешнее исключение."""
+
+    @pytest.mark.asyncio
+    async def test_price_too_low_stops_loop(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.grid_step_pct = Decimal("0.5")
+        bot.buy_order_value = Decimal("10")
+        bot.orders = [Order("b0", "BUY", Decimal("0.0001"), Decimal("1"), status="open")]
+        bot.ex = MagicMock()
+        bot.ex.symbol_info = AsyncMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("0.0001"),
+                "minNotional": Decimal("0"),
+            }
+        )
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("10000"))
+        bot.ex.balance = AsyncMock(return_value=Decimal("10000"))
+        bot.ex.place_limit = AsyncMock(return_value={"orderId": "x"})
+        bot.get_required_notional = MagicMock(return_value=Decimal("0"))
+        bot.get_max_buy_orders = MagicMock(return_value=60)
+        bot._align_to_tick = MagicMock(return_value=Decimal("0"))
+
+        n = await grid_protection.create_buy_orders_at_bottom(bot, Decimal("1"))
+        assert n == 0
+        bot.ex.place_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_place_limit_exception_logged_and_continue_attempt(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.grid_step_pct = Decimal("0.015")
+        bot.buy_order_value = Decimal("50")
+        bot.orders = [Order("b0", "BUY", Decimal("100"), Decimal("0.1"), status="open")]
+        bot.ex = MagicMock()
+        bot.ex.symbol_info = AsyncMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("0.0001"),
+                "minNotional": Decimal("0"),
+            }
+        )
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("5000"))
+        bot.ex.balance = AsyncMock(return_value=Decimal("5000"))
+        bot.ex.place_limit = AsyncMock(side_effect=RuntimeError("network"))
+        bot.get_required_notional = MagicMock(return_value=Decimal("0"))
+        bot.get_max_buy_orders = MagicMock(return_value=60)
+
+        def align(price, tick):
+            return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
+        bot._align_to_tick = MagicMock(side_effect=align)
+        n = await grid_protection.create_buy_orders_at_bottom(bot, Decimal("100"))
+        assert n == 0
+
+    @pytest.mark.asyncio
+    async def test_qty_below_min_logs_warning(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.grid_step_pct = Decimal("0.015")
+        bot.buy_order_value = Decimal("1")
+        bot.orders = [Order("b0", "BUY", Decimal("100"), Decimal("0.1"), status="open")]
+        bot.ex = MagicMock()
+        bot.ex.symbol_info = AsyncMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("10"),
+                "minNotional": Decimal("0"),
+            }
+        )
+        bot.ex.available_balance = AsyncMock(return_value=Decimal("5000"))
+        bot.ex.balance = AsyncMock(return_value=Decimal("5000"))
+        bot.get_required_notional = MagicMock(return_value=Decimal("0"))
+        bot.get_max_buy_orders = MagicMock(return_value=60)
+
+        def align(price, tick):
+            return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
+        bot._align_to_tick = MagicMock(side_effect=align)
+        n = await grid_protection.create_buy_orders_at_bottom(bot, Decimal("100"))
+        assert n == 0
+        bot.ex.place_limit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_symbol_info_exception_returns_zero(self):
+        bot = MagicMock()
+        bot.symbol = "ETH-USDT"
+        bot.quote_asset_name = "USDT"
+        bot.grid_step_pct = Decimal("0.015")
+        bot.buy_order_value = Decimal("50")
+        bot.orders = []
+        bot.ex = MagicMock()
+        bot.ex.symbol_info = AsyncMock(side_effect=OSError("down"))
+        n = await grid_protection.create_buy_orders_at_bottom(bot, Decimal("100"))
+        assert n == 0
+
+    @pytest.mark.asyncio
+    async def test_loop_breaks_when_available_drops_below_order_value(self):
+        """Стр. 101–104: на второй итерации available < buy_order_value — break без второго place."""
+        class _B:
+            pass
+
+        b = _B()
+        b.symbol = "ETH-USDT"
+        b.quote_asset_name = "USDT"
+        b.grid_step_pct = Decimal("0.015")
+        b.buy_order_value = Decimal("50")
+        b.orders = [Order(str(i), "BUY", Decimal("100"), Decimal("0.1"), status="open") for i in range(63)]
+        b.ex = MagicMock()
+        b.ex.symbol_info = AsyncMock(
+            return_value={
+                "stepSize": Decimal("0.0001"),
+                "tickSize": Decimal("0.01"),
+                "minQty": Decimal("0.0001"),
+                "minNotional": Decimal("0"),
+            }
+        )
+        b.ex.balance = AsyncMock(return_value=Decimal("10000"))
+        # pre-check, затем первая итерация — ок, вторая — мало quote
+        b.ex.available_balance = AsyncMock(side_effect=[Decimal("10000"), Decimal("10000"), Decimal("10")])
+        b.ex.place_limit = AsyncMock(return_value={"orderId": "p1"})
+        b.get_required_notional = lambda _m: Decimal("0")
+        b.get_max_buy_orders = lambda: 60
+
+        def _align(price, tick):
+            return (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+
+        b._align_to_tick = _align
+        n = await grid_protection.create_buy_orders_at_bottom(b, Decimal("200"))
+        assert n == 1
+        assert b.ex.place_limit.call_count == 1
+
 
 class TestRebalanceCheck:
     """Тесты rebalance.check_rebalancing (остановленный бот не ребалансирует)."""

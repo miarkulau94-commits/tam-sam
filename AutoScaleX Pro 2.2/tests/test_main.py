@@ -110,3 +110,21 @@ class TestMainConfig:
                 from main import main
                 main()
                 mock_runner.run.assert_called_once()
+
+    def test_main_warns_when_api_keys_missing_but_encryption_ok(self):
+        with patch("main.config") as mock_config:
+            mock_config.TG_TOKEN = "valid_token_abc_unique"
+            mock_config.API_KEY = None
+            mock_config.SECRET = None
+            mock_config.ENCRYPTION_SECRET = "enc_secret"
+            mock_runner = MagicMock()
+            with patch("main.BotRunner", return_value=mock_runner):
+                with patch("main.log") as mock_log:
+                    from main import main
+
+                    main()
+                    mock_runner.run.assert_called_once()
+                    texts = [str(c[0][0]) for c in mock_log.warning.call_args_list if c[0]]
+                    assert any("API keys not set" in t for t in texts)
+
+

@@ -424,3 +424,68 @@ def test_tail_fields_persisted_in_save_state():
             assert saved.get("step_tail") == "15.00"
             assert saved.get("tail_anchor_price") == "2000"
             assert saved.get("tail_activated_at") == 1_700_000_000.0
+
+
+def test_open_sell_threshold_none_uses_high_tier():
+    assert tail_grid.open_sell_threshold_for_grid_step(None) == config.TAIL_OPEN_SELL_THRESHOLD_0_75_PCT
+
+
+def test_normalize_klines_dict_without_list_returns_empty():
+    assert tail_grid.normalize_klines_payload({"code": 0}) == []
+
+
+def test_normalize_klines_non_list_non_dict():
+    assert tail_grid.normalize_klines_payload("not-a-list") == []
+
+
+def test_normalize_klines_invalid_time_skips_t_int():
+    raw = {"data": [{"open": "1", "high": "2", "low": "0.5", "close": "1", "time": "not-int"}]}
+    out = tail_grid.normalize_klines_payload(raw)
+    assert len(out) == 1
+    assert "_t" not in out[0]
+
+
+def test_order_candles_empty_list():
+    assert tail_grid.order_candles_chronologically([]) == []
+
+
+def test_compute_atr_returns_none_when_tr_series_shorter_than_period():
+    """14 свечей → len(TR)=13 < period 14 → None (ветка len(trs) < period)."""
+    candles = []
+    t0 = 1_000
+    for i in range(14):
+        candles.append(
+            {
+                "open": Decimal("100"),
+                "high": Decimal("101"),
+                "low": Decimal("99"),
+                "close": Decimal("100"),
+                "_t": t0 + i,
+            }
+        )
+    assert tail_grid.compute_atr_wilder(candles, 14) is None
+
+
+def test_step_tail_when_raw_nonpositive_uses_fallback():
+    tick = Decimal("0.01")
+    st = tail_grid.step_tail_price_wilder(Decimal("0"), Decimal("1"), tick, Decimal("2.5"))
+    assert st == Decimal("2.50")
+
+
+def test_step_tail_when_tick_zero_returns_raw():
+    st = tail_grid.step_tail_price_wilder(Decimal("1"), Decimal("1"), Decimal("0"), Decimal("3"))
+    assert st == Decimal("1")
+
+
+def test_normalize_klines_short_array_row_skipped():
+    """Ветка else: строка list/tuple с len < 5 — continue (стр. 67)."""
+    raw = {"data": [[1, 2, 3], [1_700_000_000_000, "10", "11", "9", "10"]]}
+    out = tail_grid.normalize_klines_payload(raw)
+    assert len(out) == 1
+
+
+def test_step_tail_negative_atr_times_k_uses_fallback_when_raw_nonpositive():
+    """atr > 0, k < 0 → raw отрицательный; ветка raw <= 0 подставляет fallback (стр. 121–122)."""
+    tick = Decimal("0.01")
+    st = tail_grid.step_tail_price_wilder(Decimal("10"), Decimal("-0.5"), tick, Decimal("2.5"))
+    assert st == Decimal("2.50")

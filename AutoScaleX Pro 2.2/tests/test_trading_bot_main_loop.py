@@ -15,6 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from trading_bot import BotState, TradingBot
 
 
+def test_log_prefix_contains_user_and_symbol():
+    mock_ex = MagicMock()
+    mock_ex.circuit_breaker = MagicMock()
+    mock_ex.circuit_breaker.reset = MagicMock()
+    with patch("trading_bot.BingXSpot", return_value=mock_ex), patch("trading_bot.BingXSpotAsync", return_value=mock_ex):
+        bot = TradingBot(424242, "k", "s", symbol="LINK-USDT")
+    assert bot._log_prefix() == "user_id=424242 LINK-USDT"
+
+
 @pytest.fixture
 def temp_dirs():
     with tempfile.TemporaryDirectory() as state_dir:

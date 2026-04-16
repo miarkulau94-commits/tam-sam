@@ -2,7 +2,7 @@
 import os
 import sys
 import tempfile
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 import pytest
 
@@ -169,3 +169,37 @@ class TestStatePersistence:
             assert data["uid"] == uid
             assert data["trades"] == []
             assert data.get("total_trades", 0) == 0
+
+    def test_list_user_ids_oserror_returns_empty(self):
+        with tempfile.TemporaryDirectory() as base:
+            from persistence import StatePersistence
+
+            p = StatePersistence(state_dir=base, user_data_dir=base)
+            with patch("persistence.os.listdir", side_effect=OSError("denied")):
+                assert p.list_user_ids_with_state() == []
+
+    def test_save_state_open_oserror_swallowed(self):
+        with tempfile.TemporaryDirectory() as base:
+            from persistence import StatePersistence
+
+            p = StatePersistence(state_dir=base, user_data_dir=base)
+            with patch("builtins.open", mock_open()) as m:
+                m.side_effect = OSError("disk full")
+                p.save_state(1, {"x": 1})
+
+    def test_delete_state_oserror_swallowed(self):
+        with tempfile.TemporaryDirectory() as base:
+            from persistence import StatePersistence
+
+            p = StatePersistence(state_dir=base, user_data_dir=base)
+            p.save_state(2, {"a": 1})
+            with patch("persistence.os.remove", side_effect=OSError("busy")):
+                p.delete_state(2)
+
+    def test_has_api_keys_false_on_load_error(self):
+        with tempfile.TemporaryDirectory() as base:
+            from persistence import StatePersistence
+
+            p = StatePersistence(state_dir=base, user_data_dir=base)
+            with patch.object(p, "load_user_trades", side_effect=ValueError("bad")):
+                assert p.has_api_keys("1") is False

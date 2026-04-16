@@ -259,17 +259,27 @@ async def handle_sell_filled(bot: "TradingBot", order: Order, price: Decimal) ->
         log.info(f"[SELL FILL] After sync: open SELL={len(open_sell_after)}, open BUY={len(open_buy_after)}")
 
         if len(open_sell_after) == 1:
-            log.info("[SELL FILL] Only 1 SELL order remaining, cancelling %s last BUY orders to free USDT for new SELL grid", config.REBALANCE_PREP_CANCEL_BUY_COUNT)
-            canceled_count = await bot.cancel_last_n_buy_orders(config.REBALANCE_PREP_CANCEL_BUY_COUNT)
-
-            if canceled_count > 0:
-                bot._cancelled_buy_for_rebalance_prep = True
-                await bot.ex.invalidate_balance_cache(bot.quote_asset_name)
-                await asyncio.sleep(1)
-                quote_available_after = await bot.ex.available_balance(bot.quote_asset_name)
+            # Подготовка (отмена N нижних BUY) — один раз за «цикл»: пока флаг True, не повторяем.
+            # Сброс: полный ребаланс (rebalance._rebalancing_apply_after_market_buy) или
+            # восстановление BUY внизу при open SELL>=3 (handle_buy_filled).
+            if getattr(bot, "_cancelled_buy_for_rebalance_prep", False):
                 log.info(
-                    f"[SELL FILL] After cancelling {canceled_count} BUY orders: available balance = {quote_available_after:.2f} {bot.quote_asset_name}"
+                    "[SELL FILL] Skip rebalance prep (cancel %s lowest BUY): already prepared; "
+                    "next only after full rebalancing or restoring BUY at bottom (open SELL>=3)",
+                    config.REBALANCE_PREP_CANCEL_BUY_COUNT,
                 )
+            else:
+                log.info("[SELL FILL] Only 1 SELL order remaining, cancelling %s last BUY orders to free USDT for new SELL grid", config.REBALANCE_PREP_CANCEL_BUY_COUNT)
+                canceled_count = await bot.cancel_last_n_buy_orders(config.REBALANCE_PREP_CANCEL_BUY_COUNT)
+
+                if canceled_count > 0:
+                    bot._cancelled_buy_for_rebalance_prep = True
+                    await bot.ex.invalidate_balance_cache(bot.quote_asset_name)
+                    await asyncio.sleep(1)
+                    quote_available_after = await bot.ex.available_balance(bot.quote_asset_name)
+                    log.info(
+                        f"[SELL FILL] After cancelling {canceled_count} BUY orders: available balance = {quote_available_after:.2f} {bot.quote_asset_name}"
+                    )
 
         if bot.profit_bank > 0:
             await bot.check_pyramiding()

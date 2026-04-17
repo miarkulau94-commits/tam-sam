@@ -100,7 +100,12 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
             if available_base_asset < sell_qty and step and step > 0:
                 qty_cap = (available_base_asset // step) * step
                 gap = sell_qty - qty_cap
-                micro_limit = max(step, sell_qty * Decimal("0.001"))
+                # 0.1% sell_qty мало: после BUY free чуть ниже hedge из-за комиссии + step (типично ~0.12–0.15%).
+                micro_limit = max(
+                    step,
+                    sell_qty * Decimal("0.001"),
+                    sell_qty * config.FEE_RATE * Decimal("3"),
+                )
                 if qty_cap >= min_qty and gap <= micro_limit:
                     log.info(
                         f"[CREATE_SELL_AFTER_BUY] Micro shortage: free {available_base_asset:.8f} < hedge {sell_qty:.8f}; "

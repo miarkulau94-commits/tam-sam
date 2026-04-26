@@ -58,6 +58,22 @@ CRITICAL_SELL_DIVISIONS = len(CRITICAL_SELL_PROFIT_PCT)
 # BingX настройки (sandbox не используется — всегда production API)
 MIN_ORDER = Decimal(os.getenv("MIN_ORDER", "20"))
 
+# BingX HTTP (requests.Session): connect — установка TCP+TLS; read — ожидание тела ответа.
+# В .env: BINGX_HTTP_CONNECT_TIMEOUT=20 и BINGX_HTTP_READ_TIMEOUT=20 (секунды, можно дробные).
+def _positive_http_timeout(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name)
+        if raw is None or str(raw).strip() == "":
+            return default
+        v = float(raw)
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+BINGX_HTTP_CONNECT_TIMEOUT = _positive_http_timeout("BINGX_HTTP_CONNECT_TIMEOUT", 20.0)
+BINGX_HTTP_READ_TIMEOUT = _positive_http_timeout("BINGX_HTTP_READ_TIMEOUT", 20.0)
+
 # Реферальная система
 REFERRAL_LINK = os.getenv("REFERRAL_LINK", "https://iciclebridge.com/invite/GJCRMN/")
 REFERRALS_FILE = os.path.normpath(os.path.join(_BASE_DIR, "..", "referrals.json"))

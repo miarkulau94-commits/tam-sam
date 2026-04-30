@@ -846,6 +846,7 @@ class TelegramBotManager:
 
         # Сначала ставим STOPPED, чтобы main_loop и обработка ордеров не выставляли новые ордера
         bot.state = BotState.STOPPED
+        bot._clear_pending_hedge()
 
         # Отменяем все ордера на бирже
         try:

@@ -100,10 +100,10 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
             if available_base_asset < sell_qty and step and step > 0:
                 qty_cap = (available_base_asset // step) * step
                 gap = sell_qty - qty_cap
-                # 0.1% sell_qty мало: после BUY free чуть ниже hedge из-за комиссии + step (типично ~0.12–0.15%).
+                # Доля от sell_qty (было 0.1%, поднято до 0.3%): после BUY free чуть ниже hedge из-за комиссии + step.
                 micro_limit = max(
                     step,
-                    sell_qty * Decimal("0.001"),
+                    sell_qty * Decimal("0.003"),
                     sell_qty * config.FEE_RATE * Decimal("3"),
                 )
                 if qty_cap >= min_qty and gap <= micro_limit:
@@ -139,6 +139,7 @@ async def handle_buy_filled(bot: "TradingBot", order: Order, price: Decimal) -> 
                         f"[CREATE_SELL_AFTER_BUY] SKIPPED: free {available_base_asset:.8f} < hedge SELL qty {sell_qty:.8f} "
                         f"(total={current_base_balance:.8f}). If assets are locked in open SELLs, cancel some on the exchange."
                     )
+                    bot.queue_pending_hedge_after_buy_skipped(price, sell_qty)
                 else:
                     if bot.state == BotState.STOPPED:
                         return

@@ -89,6 +89,12 @@ class TradingBot:
         # ТЗ п.4.6: время последнего события (отмена хвоста или kline для хвоста) — анти-дребезг перевключения
         self._tail_antiflap_last_ts: Optional[float] = None
 
+        # Отложенный парный SELL после BUY, если первый раз free base < hedge (часть в открытых SELL)
+        self._pending_hedge_buy_fill_price: Optional[Decimal] = None
+        self._pending_hedge_target_qty: Optional[Decimal] = None
+        self._pending_hedge_started_ts: Optional[float] = None
+        self._pending_hedge_last_try_ts: Optional[float] = None
+
         # Статистика (инициализируем позже, после получения UID)
         self.initial_equity = Decimal("0")
         self.statistics = None  # Будет инициализирован в load_state после получения UID
@@ -278,6 +284,20 @@ class TradingBot:
                     except (TypeError, ValueError):
                         self._tail_antiflap_last_ts = None
 
+                _ph_p = state.get("pending_hedge_buy_fill_price")
+                _ph_q = state.get("pending_hedge_target_qty")
+                _ph_ts = state.get("pending_hedge_started_ts")
+                if _ph_p not in (None, "") and _ph_q not in (None, ""):
+                    try:
+                        self._pending_hedge_buy_fill_price = Decimal(str(_ph_p))
+                        self._pending_hedge_target_qty = Decimal(str(_ph_q))
+                        self._pending_hedge_started_ts = float(_ph_ts) if _ph_ts not in (None, "") else time.time()
+                    except (TypeError, ValueError):
+                        self._clear_pending_hedge()
+                    self._pending_hedge_last_try_ts = None
+                else:
+                    self._clear_pending_hedge()
+
                 log.info(f"State loaded for user {self.user_id}")
             else:
                 # Если state пустой, используем user_id как UID
@@ -344,6 +364,15 @@ class TradingBot:
                 else "",
                 "tail_antiflap_last_ts": self._tail_antiflap_last_ts
                 if getattr(self, "_tail_antiflap_last_ts", None) is not None
+                else None,
+                "pending_hedge_buy_fill_price": str(self._pending_hedge_buy_fill_price)
+                if getattr(self, "_pending_hedge_buy_fill_price", None) is not None
+                else "",
+                "pending_hedge_target_qty": str(self._pending_hedge_target_qty)
+                if getattr(self, "_pending_hedge_target_qty", None) is not None
+                else "",
+                "pending_hedge_started_ts": self._pending_hedge_started_ts
+                if getattr(self, "_pending_hedge_started_ts", None) is not None
                 else None,
             }
             log.debug(f"Saving state: grid_step_pct={self.grid_step_pct} ({self.grid_step_pct * 100:.2f}%), uid={self.uid}")
@@ -750,6 +779,115 @@ class TradingBot:
         if min_notional > 0:
             return min_notional
         return Decimal("0")
+
+    _PENDING_HEDGE_TTL_SEC = 72 * 3600
+    _PENDING_HEDGE_RETRY_INTERVAL_SEC = 12.0
+
+    def _clear_pending_hedge(self) -> None:
+        self._pending_hedge_buy_fill_price = None
+        self._pending_hedge_target_qty = None
+        self._pending_hedge_started_ts = None
+        self._pending_hedge_last_try_ts = None
+
+    def queue_pending_hedge_after_buy_skipped(self, buy_fill_price: Decimal, target_qty: Decimal) -> None:
+        """Запланировать повторную попытку парного SELL (хедж после BUY), когда free base станет достаточным."""
+        self._pending_hedge_buy_fill_price = buy_fill_price
+        self._pending_hedge_target_qty = target_qty
+        self._pending_hedge_started_ts = time.time()
+        self._pending_hedge_last_try_ts = None
+        log.info(
+            "[PENDING_HEDGE] Queued retry for SELL-after-BUY: anchor=%s target_qty=%s",
+            buy_fill_price,
+            target_qty,
+        )
+
+    async def try_flush_pending_hedge(self) -> None:
+        """Периодически догоняем парный SELL, если ранее SKIPPED из-за недостатка free base."""
+        if self.state != BotState.TRADING:
+            return
+        if self._pending_hedge_buy_fill_price is None or self._pending_hedge_target_qty is None:
+            return
+        now = time.time()
+        if self._pending_hedge_started_ts is not None and (now - self._pending_hedge_started_ts) > self._PENDING_HEDGE_TTL_SEC:
+            log.warning(
+                "[PENDING_HEDGE] Giving up after %sh: anchor=%s",
+                self._PENDING_HEDGE_TTL_SEC // 3600,
+                self._pending_hedge_buy_fill_price,
+            )
+            self._clear_pending_hedge()
+            await asyncio.to_thread(self.save_state)
+            return
+        if self._pending_hedge_last_try_ts is not None and (now - self._pending_hedge_last_try_ts) < self._PENDING_HEDGE_RETRY_INTERVAL_SEC:
+            return
+        self._pending_hedge_last_try_ts = now
+
+        try:
+            info = await self.ex.symbol_info(self.symbol)
+            step = info["stepSize"]
+            tick = info["tickSize"]
+            min_qty = info.get("minQty", Decimal("0.000001"))
+            min_notional = info.get("minNotional", Decimal("0"))
+        except Exception as e:
+            log.debug("[PENDING_HEDGE] symbol_info failed: %s", e)
+            return
+
+        await self.ex.invalidate_balance_cache(self.base_asset_name)
+        await asyncio.sleep(0.25)
+        try:
+            available = await self.ex.available_balance(self.base_asset_name)
+        except Exception as e:
+            log.debug("[PENDING_HEDGE] balance failed: %s", e)
+            return
+
+        target = self._pending_hedge_target_qty
+        anchor = self._pending_hedge_buy_fill_price
+        sell_qty = (target // step) * step if step and step > 0 else target
+        cap = (available // step) * step if step and step > 0 else available
+        if cap < sell_qty:
+            sell_qty = cap
+        if sell_qty < min_qty:
+            log.info(
+                "[PENDING_HEDGE] Retry later: free=%s cap=%s target=%s (below min_qty)",
+                available,
+                cap,
+                target,
+            )
+            return
+
+        resolved = self.find_next_free_sell_price_up(anchor, tick)
+        if resolved is None:
+            log.info("[PENDING_HEDGE] No free SELL level yet (anchor=%s)", anchor)
+            return
+
+        sell_notional = sell_qty * resolved
+        required = self.get_required_notional(min_notional)
+        if sell_notional < required:
+            log.info("[PENDING_HEDGE] Notional too small: %s < %s", sell_notional, required)
+            return
+
+        if available < sell_qty:
+            log.info(
+                "[PENDING_HEDGE] Retry later: free=%s < sell_qty=%s",
+                available,
+                sell_qty,
+            )
+            return
+
+        if self.state == BotState.STOPPED:
+            return
+        try:
+            log.info("[PENDING_HEDGE] Placing SELL: price=%s qty=%s (target was %s)", resolved, sell_qty, target)
+            result = await self.ex.place_limit(self.symbol, "SELL", sell_qty, resolved, delay=0.1)
+            if result and result.get("orderId"):
+                oid = str(result.get("orderId", ""))
+                self.orders.append(Order(order_id=oid, side="SELL", price=resolved, qty=sell_qty))
+                self._clear_pending_hedge()
+                log.info("[PENDING_HEDGE] Success orderId=%s — pending cleared", oid)
+                await asyncio.to_thread(self.save_state)
+            else:
+                log.warning("[PENDING_HEDGE] place_limit no orderId: %s", result)
+        except Exception as e:
+            log.warning("[PENDING_HEDGE] place_limit failed: %s", e)
 
     async def _create_grid_do_market_buy(self, price: Decimal) -> Decimal:
         """Шаг 1: рыночная покупка для SELL ордеров. Возвращает текущий баланс base asset."""
@@ -2216,6 +2354,7 @@ class TradingBot:
                     # Иначе sync_orders_from_exchange удалит исполненные ордера до того, как check_orders их обработает
                     await self.check_orders()
                     await self.sync_orders_from_exchange()
+                    await self.try_flush_pending_hedge()
                     # Проверяем критическую ситуацию: все BUY исполнены, но SELL не созданы и рыночная покупка не сработала
                     await self.check_critical_situation()
                     await self.maybe_process_tail_grid()
@@ -2227,6 +2366,7 @@ class TradingBot:
                     await self.check_orders()
 
                 elif self.state == BotState.STOPPED:
+                    self._clear_pending_hedge()
                     log.info("[MAIN_LOOP] %s | State: STOPPED - exiting main loop", self._log_prefix())
                     break
 

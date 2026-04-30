@@ -107,3 +107,29 @@ async def test_try_flush_skips_when_below_min_volume(bot_pending):
 
     bot.ex.place_limit.assert_not_awaited()
     assert bot._pending_hedge_target_qty == Decimal("0.5")
+
+
+@pytest.mark.asyncio
+async def test_try_flush_learns_min_volume_from_api_error(bot_pending):
+    bot = bot_pending
+    bot.queue_pending_hedge_after_buy_skipped(Decimal("100"), Decimal("0.5"))
+    bot.ex.symbol_info = AsyncMock(
+        return_value={
+            "stepSize": Decimal("0.001"),
+            "tickSize": Decimal("0.1"),
+            "minQty": Decimal("0.001"),
+            "minNotional": Decimal("0"),
+        }
+    )
+    bot.ex.invalidate_balance_cache = AsyncMock()
+    bot.ex.available_balance = AsyncMock(return_value=Decimal("0.03"))
+    bot.ex.place_limit = AsyncMock(
+        side_effect=RuntimeError(
+            "check limit entrust value fail, entrust volume to low, minVolume:0.027, entrustVolume: 0.001, NoRetry"
+        )
+    )
+    bot.find_next_free_sell_price_up = MagicMock(return_value=Decimal("101"))
+
+    await bot.try_flush_pending_hedge()
+
+    assert bot._pending_hedge_min_qty_override == Decimal("0.027")

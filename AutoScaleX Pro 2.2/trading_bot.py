@@ -5,6 +5,7 @@ AutoScaleX Pro 2.2 - Торговый бот с Grid Trading + Pyramiding + DCA
 import asyncio
 import logging
 import os
+import re
 import time
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import IntEnum
@@ -94,6 +95,7 @@ class TradingBot:
         self._pending_hedge_target_qty: Optional[Decimal] = None
         self._pending_hedge_started_ts: Optional[float] = None
         self._pending_hedge_last_try_ts: Optional[float] = None
+        self._pending_hedge_min_qty_override: Optional[Decimal] = None
 
         # Статистика (инициализируем позже, после получения UID)
         self.initial_equity = Decimal("0")
@@ -287,11 +289,15 @@ class TradingBot:
                 _ph_p = state.get("pending_hedge_buy_fill_price")
                 _ph_q = state.get("pending_hedge_target_qty")
                 _ph_ts = state.get("pending_hedge_started_ts")
+                _ph_mq = state.get("pending_hedge_min_qty_override")
                 if _ph_p not in (None, "") and _ph_q not in (None, ""):
                     try:
                         self._pending_hedge_buy_fill_price = Decimal(str(_ph_p))
                         self._pending_hedge_target_qty = Decimal(str(_ph_q))
                         self._pending_hedge_started_ts = float(_ph_ts) if _ph_ts not in (None, "") else time.time()
+                        self._pending_hedge_min_qty_override = (
+                            Decimal(str(_ph_mq)) if _ph_mq not in (None, "") else None
+                        )
                     except (TypeError, ValueError):
                         self._clear_pending_hedge()
                     self._pending_hedge_last_try_ts = None
@@ -374,6 +380,9 @@ class TradingBot:
                 "pending_hedge_started_ts": self._pending_hedge_started_ts
                 if getattr(self, "_pending_hedge_started_ts", None) is not None
                 else None,
+                "pending_hedge_min_qty_override": str(self._pending_hedge_min_qty_override)
+                if getattr(self, "_pending_hedge_min_qty_override", None) is not None
+                else "",
             }
             log.debug(f"Saving state: grid_step_pct={self.grid_step_pct} ({self.grid_step_pct * 100:.2f}%), uid={self.uid}")
             self.persistence.save_state(self.user_id, state)
@@ -788,6 +797,18 @@ class TradingBot:
         self._pending_hedge_target_qty = None
         self._pending_hedge_started_ts = None
         self._pending_hedge_last_try_ts = None
+        self._pending_hedge_min_qty_override = None
+
+    @staticmethod
+    def _extract_min_volume_from_error(error_text: str) -> Optional[Decimal]:
+        m = re.search(r"minVolume\s*:\s*([0-9]+(?:\.[0-9]+)?)", error_text or "", flags=re.IGNORECASE)
+        if not m:
+            return None
+        try:
+            v = Decimal(m.group(1))
+            return v if v > 0 else None
+        except Exception:
+            return None
 
     def queue_pending_hedge_after_buy_skipped(self, buy_fill_price: Decimal, target_qty: Decimal) -> None:
         """Запланировать повторную попытку парного SELL (хедж после BUY), когда free base станет достаточным."""
@@ -831,7 +852,7 @@ class TradingBot:
                 min_volume = Decimal("0")
             else:
                 min_volume = Decimal(str(min_volume))
-            effective_min_qty = max(min_qty, min_volume)
+            effective_min_qty = max(min_qty, min_volume, self._pending_hedge_min_qty_override or Decimal("0"))
             min_notional = info.get("minNotional", Decimal("0"))
         except Exception as e:
             log.debug("[PENDING_HEDGE] symbol_info failed: %s", e)
@@ -894,6 +915,18 @@ class TradingBot:
             else:
                 log.warning("[PENDING_HEDGE] place_limit no orderId: %s", result)
         except Exception as e:
+            parsed_min_volume = self._extract_min_volume_from_error(str(e))
+            if parsed_min_volume is not None:
+                current = self._pending_hedge_min_qty_override or Decimal("0")
+                if parsed_min_volume > current:
+                    self._pending_hedge_min_qty_override = parsed_min_volume
+                    await asyncio.to_thread(self.save_state)
+                log.warning(
+                    "[PENDING_HEDGE] place_limit failed; learned min qty override=%s from error: %s",
+                    parsed_min_volume,
+                    e,
+                )
+                return
             log.warning("[PENDING_HEDGE] place_limit failed: %s", e)
 
     async def _create_grid_do_market_buy(self, price: Decimal) -> Decimal:

@@ -254,6 +254,18 @@ class TelegramBotManager:
                     bot = await asyncio.to_thread(
                         _create_trading_bot, user_id, api_key, secret, notifier, symbol
                     )
+                    # После рестарта поднимаем восстановленные боты в активную торговлю:
+                    # если на бирже есть открытые ордера, бот должен продолжать цикл без ручного "Старт".
+                    if bot.state != BotState.TRADING:
+                        prev_state = bot.state
+                        bot.state = BotState.TRADING
+                        await asyncio.to_thread(bot.save_state)
+                        log.info(
+                            "[AUTO-RESTORE] user_id=%s symbol=%s: forcing state TRADING (was %s)",
+                            user_id,
+                            symbol,
+                            prev_state,
+                        )
                     self.user_bots[user_id] = bot
                     self.uid_bots[uid] = user_id
                     asyncio.create_task(bot.main_loop())

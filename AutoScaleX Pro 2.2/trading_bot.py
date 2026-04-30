@@ -826,6 +826,12 @@ class TradingBot:
             step = info["stepSize"]
             tick = info["tickSize"]
             min_qty = info.get("minQty", Decimal("0.000001"))
+            min_volume = info.get("minVolume")
+            if min_volume in (None, ""):
+                min_volume = Decimal("0")
+            else:
+                min_volume = Decimal(str(min_volume))
+            effective_min_qty = max(min_qty, min_volume)
             min_notional = info.get("minNotional", Decimal("0"))
         except Exception as e:
             log.debug("[PENDING_HEDGE] symbol_info failed: %s", e)
@@ -845,12 +851,13 @@ class TradingBot:
         cap = (available // step) * step if step and step > 0 else available
         if cap < sell_qty:
             sell_qty = cap
-        if sell_qty < min_qty:
+        if sell_qty < effective_min_qty:
             log.info(
-                "[PENDING_HEDGE] Retry later: free=%s cap=%s target=%s (below min_qty)",
+                "[PENDING_HEDGE] Retry later: free=%s cap=%s target=%s (below effective min qty %s)",
                 available,
                 cap,
                 target,
+                effective_min_qty,
             )
             return
 

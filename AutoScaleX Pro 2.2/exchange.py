@@ -444,9 +444,22 @@ class BingXSpot:
                 }
             for item in raw.get("symbols", []):
                 if item.get("symbol") == symbol:
-                    lot = next((f for f in item.get("filters", []) if f.get("filterType") == "LOT_SIZE"), {})
-                    pricef = next((f for f in item.get("filters", []) if f.get("filterType") == "PRICE_FILTER"), {})
-                    minn = next((f for f in item.get("filters", []) if f.get("filterType") == "MIN_NOTIONAL"), {})
+                    filters = item.get("filters", []) or []
+                    lot = next((f for f in filters if f.get("filterType") == "LOT_SIZE"), {})
+                    pricef = next((f for f in filters if f.get("filterType") == "PRICE_FILTER"), {})
+                    minn = next((f for f in filters if f.get("filterType") == "MIN_NOTIONAL"), {})
+                    min_volume_raw = (
+                        item.get("minVolume")
+                        or lot.get("minVolume")
+                        or minn.get("minVolume")
+                        or minn.get("minQty")
+                    )
+                    min_volume = None
+                    if min_volume_raw not in (None, ""):
+                        try:
+                            min_volume = Decimal(str(min_volume_raw))
+                        except Exception:
+                            min_volume = None
                     status_raw = item.get("status", 0)
                     if status_raw == 1 or status_raw == "1" or str(status_raw) == "1" or status_raw == "TRADING":
                         status = "TRADING"
@@ -463,6 +476,7 @@ class BingXSpot:
                     self._symbol_info[symbol] = {
                         "stepSize": Decimal(lot.get("stepSize", "0.000001")),
                         "minQty": Decimal(lot.get("minQty", "0.000001")),
+                        "minVolume": min_volume,
                         "minNotional": Decimal(minn.get("minNotional", "0")),
                         "tickSize": Decimal(pricef.get("tickSize", "0.01")),
                         "status": status,
